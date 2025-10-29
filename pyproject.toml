@@ -1,0 +1,28 @@
+[build-system]
+requires = ["hatchling>=1.25.0"]
+build-backend = "hatchling.build"
+
+[project]
+name = "icemas"
+version = "0.1.0"
+description = "Cache-aware LLM Agent Scheduler MAS with FastAPI and LangGraph"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "fastapi>=0.111.0",
+  "uvicorn[standard]>=0.30.0",
+  "httpx>=0.27.0",
+  "langgraph>=0.2.19",
+  "langchain>=0.2.14",
+  "langchain-core>=0.2.34",
+  "langchain-openai>=0.1.22",
+  "pydantic>=2.9.0",
+  "typing-extensions>=4.12.2",
+  "vllm"
+]
+
+[tool.uv]
+dev-dependencies = []
+
+[tool.hatch.build.targets.wheel]
+packages = ["icemas"]
