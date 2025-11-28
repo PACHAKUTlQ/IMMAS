@@ -18,7 +18,10 @@ dependencies = [
   "langchain-openai>=0.1.22",
   "pydantic>=2.9.0",
   "typing-extensions>=4.12.2",
-  "vllm"
+  "vllm",
+  "pandas>=2.3.3",
+  "matplotlib>=3.10.7",
+  "numpy>=2.2.6",
 ]
 
 [tool.uv]
