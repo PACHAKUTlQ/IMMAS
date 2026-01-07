@@ -11,9 +11,8 @@ from dataclasses import dataclass
 
 import hashlib
 
-import hashlib
 
-from typing import Any, Dict, Iterable, List, Mapping, Optional
+from typing import Any, Dict, Iterable, List, Mapping
 
 from datasets import load_dataset
 
