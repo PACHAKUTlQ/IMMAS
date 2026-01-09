@@ -29,6 +29,8 @@ class PredictorInput:
     turn_number: int
     prompt_text: str
     kvmatch: float
+    client_inflight: int = 0
+    client_rps_1s: float = 0.0
 
 
 class AgentPredictor:
@@ -74,6 +76,8 @@ class AgentPredictor:
             "turn_number": float(inp.turn_number),
             "prompt_chars": float(len(inp.prompt_text)),
             "kvmatch": float(inp.kvmatch),
+            "client_inflight": float(inp.client_inflight),
+            "client_rps_1s": float(inp.client_rps_1s),
         }
 
     def predict(self, inp: PredictorInput) -> Dict[str, MetricPred]:

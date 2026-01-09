@@ -1,26 +1,35 @@
 """
-Fake OpenAI-compatible server for CoQA.
+Fake OpenAI-compatible server for CoQA with vLLM-ish load/latency simulation.
 
 Implements:
 - GET  /v1/models
+- GET  /v1/internal/load          (debug)
 - POST /v1/chat/completions
 
 The server answers by looking up the gold CoQA answer using (dialogue_id, turn_number)
 parsed from the prompt text.
+
+Latency simulation
+------------------
+- Tracks in-flight and recent RPS per process.
+- Simulates TTFT + decode latency with occasional batch-correlated spikes.
 """
 
 from __future__ import annotations
 
+import asyncio
 import os
 import time
 import uuid
-from typing import Any, Dict, Optional
+from typing import Any, Dict
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 
 from coqa_data import CoqaDatasetIndex
 from coqa_prompt import CoqaPromptParser
+from load_tracker import AsyncLoadTracker
+from vllm_latency_sim import VllmLatencySimConfig, VllmLatencySimulator
 
 
 DEFAULT_MODEL_NAME = "fake-coqa"
@@ -28,9 +37,9 @@ DEFAULT_MODEL_NAME = "fake-coqa"
 
 def estimate_tokens(text: str) -> int:
     """
-    Crude token estimator used only for 'usage' fields.
+    Crude token estimator used only for 'usage' fields and simulation.
 
-    1 token ~= 4 characters is a common rough heuristic.
+    A common heuristic: 1 token ~= 4 characters.
     """
     if not text:
         return 0
@@ -66,17 +75,20 @@ class CoqaAnswerOracle:
 
 
 def create_app() -> FastAPI:
-    app = FastAPI(title="Fake CoQA OpenAI API", version="0.1")
+    app = FastAPI(title="Fake CoQA OpenAI API", version="0.2")
 
     split = os.environ.get("COQA_SPLIT", "validation")
     model_name = os.environ.get("FAKE_MODEL_NAME", DEFAULT_MODEL_NAME)
 
-    oracle: Optional[CoqaAnswerOracle] = None
+    # Create these early; they are lightweight and per-process.
+    app.state.load_tracker = AsyncLoadTracker(
+        window_s=float(os.environ.get("FAKE_LOAD_WINDOW_S", "1.0"))
+    )
+    app.state.lat_sim = VllmLatencySimulator(VllmLatencySimConfig.from_env())
 
     @app.on_event("startup")
     def _startup() -> None:
-        nonlocal oracle
-        oracle = CoqaAnswerOracle(split=split)
+        app.state.oracle = CoqaAnswerOracle(split=split)
 
     @app.get("/v1/models")
     async def list_models() -> Dict[str, Any]:
@@ -93,9 +105,23 @@ def create_app() -> FastAPI:
             ],
         }
 
+    @app.get("/v1/internal/load")
+    async def internal_load(req: Request) -> Dict[str, Any]:
+        """
+        Debug endpoint to inspect server-side load.
+        Not part of the OpenAI API; safe to ignore.
+        """
+        tracker: AsyncLoadTracker = req.app.state.load_tracker
+        snap = await tracker.snapshot()
+        return {
+            "inflight_requests": snap.inflight_requests,
+            "rps": snap.rps,
+            "window_s": snap.window_s,
+        }
+
     @app.post("/v1/chat/completions")
     async def chat_completions(req: Request) -> Dict[str, Any]:
-        nonlocal oracle
+        oracle = getattr(req.app.state, "oracle", None)
         if oracle is None:
             raise HTTPException(
                 status_code=503, detail="Server not ready (oracle not loaded yet)."
@@ -128,13 +154,26 @@ def create_app() -> FastAPI:
         except (ValueError, IndexError) as e:
             return openai_error(f"Prompt parse/turn error: {e}", status_code=400)
 
-        # Usage counts across *all* messages to roughly mimic OpenAI usage accounting.
+        # Usage counts across all messages to mimic OpenAI usage accounting.
         prompt_tokens = sum(
             estimate_tokens(str(m.get("content") or ""))
             for m in messages
             if isinstance(m, dict)
         )
         completion_tokens = estimate_tokens(answer)
+
+        # --- Simulated latency (async, non-blocking) ---
+        tracker: AsyncLoadTracker = req.app.state.load_tracker
+        lat_sim: VllmLatencySimulator = req.app.state.lat_sim
+
+        async with tracker.track() as load:
+            sim = lat_sim.simulate(
+                prompt_tokens=int(prompt_tokens),
+                completion_tokens=int(completion_tokens),
+                load=load,
+            )
+            if sim.total_s > 0:
+                await asyncio.sleep(sim.total_s)
 
         now = int(time.time())
         resp_model = str(body.get("model") or model_name)
