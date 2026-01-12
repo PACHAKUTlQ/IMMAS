@@ -1,13 +1,6 @@
 """
 vLLM-ish latency simulation driven by server load.
 
-Design goals
-------------
-- Simple, explainable model that reproduces: "mostly flat baseline + rare batch spikes".
-- Works now (single client), but becomes meaningful once you add parallel requests.
-- Structured for extension: later you can add TTFT vs decode decomposition, queueing,
-  KV-cache reuse, per-model speed, etc.
-
 Core idea (inferred from the provided figures)
 ---------------------------------------------
 - Baseline TTFT stays roughly constant under load.
@@ -159,7 +152,7 @@ class SimulatedLatency:
     """
     Decomposed latency, in seconds.
 
-    This keeps TTFT separate so you can later implement streaming:
+    This keeps TTFT separate so can:
     - sleep TTFT
     - then stream tokens according to decode_s
     """

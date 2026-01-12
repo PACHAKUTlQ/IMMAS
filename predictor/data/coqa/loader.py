@@ -36,7 +36,7 @@ class CoqaDialogue:
         Build a CoqaDialogue from one HuggingFace dataset example.
         Notes
         -----
-        Some installations of "stanfordnlp/coqa" provide no id field. In that
+        "stanfordnlp/coqa" provide no id field. In that
         case, we derive a stable id from content (story + questions).
         """
         source = str(example.get("source", "unknown"))
@@ -141,8 +141,6 @@ def _extract_or_derive_dialogue_id(
 ) -> str:
     """
     Extract a dialogue id if present; otherwise derive a deterministic synthetic id.
-    The installed 'stanfordnlp/coqa' variant in your environment appears to have no
-    id keys at all, so this function will usually fall back to hashing.
     """
     for key in ("dialogue_id", "id", "story_id"):
         if key in example:
