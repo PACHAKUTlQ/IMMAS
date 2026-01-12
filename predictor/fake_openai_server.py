@@ -29,6 +29,7 @@ from fastapi.responses import JSONResponse
 from coqa_data import CoqaDatasetIndex
 from coqa_prompt import CoqaPromptParser
 from load_tracker import AsyncLoadTracker
+from trace_store import ChatCompletionTrace, InMemoryTraceStore
 from vllm_latency_sim import VllmLatencySimConfig, VllmLatencySimulator
 
 
@@ -77,6 +78,10 @@ class CoqaAnswerOracle:
 def create_app() -> FastAPI:
     app = FastAPI(title="Fake CoQA OpenAI API", version="0.2")
 
+    app.state.trace_store = InMemoryTraceStore(
+        max_size=int(os.environ.get("FAKE_TRACE_STORE_MAX", "50000"))
+    )
+
     split = os.environ.get("COQA_SPLIT", "validation")
     model_name = os.environ.get("FAKE_MODEL_NAME", DEFAULT_MODEL_NAME)
 
@@ -104,6 +109,18 @@ def create_app() -> FastAPI:
                 }
             ],
         }
+
+    @app.get("/v1/internal/chat_completions/{completion_id}")
+    async def get_chat_completion_trace(
+        completion_id: str, req: Request
+    ) -> Dict[str, Any]:
+        store: InMemoryTraceStore = req.app.state.trace_store
+        trace = await store.get(completion_id)
+        if trace is None:
+            raise HTTPException(
+                status_code=404, detail="Trace not found (evicted or wrong worker)."
+            )
+        return trace.to_dict()
 
     @app.get("/v1/internal/load")
     async def internal_load(req: Request) -> Dict[str, Any]:
@@ -166,6 +183,11 @@ def create_app() -> FastAPI:
         tracker: AsyncLoadTracker = req.app.state.load_tracker
         lat_sim: VllmLatencySimulator = req.app.state.lat_sim
 
+        completion_id = f"chatcmpl-{uuid.uuid4().hex}"
+        created = int(time.time())
+        resp_model = str(body.get("model") or model_name)
+        t_server0 = time.perf_counter()
+
         async with tracker.track() as load:
             sim = lat_sim.simulate(
                 prompt_tokens=int(prompt_tokens),
@@ -175,13 +197,37 @@ def create_app() -> FastAPI:
             if sim.total_s > 0:
                 await asyncio.sleep(sim.total_s)
 
-        now = int(time.time())
-        resp_model = str(body.get("model") or model_name)
+        t_server1 = time.perf_counter()
+        server_wall_s = float(t_server1 - t_server0)
+        store: InMemoryTraceStore = req.app.state.trace_store
+
+        await store.put(
+            ChatCompletionTrace(
+                completion_id=completion_id,
+                created=created,
+                model=resp_model,
+                prompt_tokens=int(prompt_tokens),
+                completion_tokens=int(completion_tokens),
+                total_tokens=int(prompt_tokens + completion_tokens),
+                load_inflight=int(load.inflight_requests),
+                load_rps=float(load.rps),
+                sim_ttft_s=float(sim.ttft_s),
+                sim_decode_s=float(sim.decode_s),
+                sim_queue_s=float(sim.queue_s),
+                sim_stall_s=float(sim.stall_s),
+                sim_warmup_s=float(sim.warmup_s),
+                sim_total_s=float(sim.total_s),
+                effective_inflight=int(sim.effective_inflight),
+                utilization=float(sim.utilization),
+                sim_rps=float(sim.rps),
+                server_wall_s=server_wall_s,
+            )
+        )
 
         return {
-            "id": f"chatcmpl-{uuid.uuid4().hex}",
+            "id": completion_id,
             "object": "chat.completion",
-            "created": now,
+            "created": created,
             "model": resp_model,
             "choices": [
                 {
