@@ -21,7 +21,7 @@ import os
 import random
 from dataclasses import dataclass
 
-from load_tracker import LoadSnapshot
+from predictor.sim.load import LoadSnapshot
 
 
 def _env_bool(name: str, default: bool) -> bool:

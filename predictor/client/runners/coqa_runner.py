@@ -37,12 +37,12 @@ from datasets import load_dataset
 from openai import AsyncOpenAI
 from tqdm import tqdm
 
-from coqa_data import COQA_DATASET_NAME, CoqaDialogue
-from coqa_prompt import CoqaPromptFormatter
-from load_tracker import AsyncLoadTracker
-from predictor import AgentPredictor, PredictorInput
-from prefix_cache import TextPrefixCache
-from run_log import AsyncJsonlLogger, RequestLogRecord
+from predictor.data.coqa.loader import COQA_DATASET_NAME, CoqaDialogue
+from predictor.data.coqa.prompt import CoqaPromptFormatter
+from predictor.sim.load import AsyncLoadTracker
+from predictor.core.engine import AgentPredictor, PredictorInput
+from predictor.core.prefix_cache import TextPrefixCache
+from predictor.client.logger import AsyncJsonlLogger, RequestLogRecord
 
 
 HistoryTurn = Tuple[str, str]

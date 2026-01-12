@@ -26,11 +26,11 @@ from typing import Any, Dict
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 
-from coqa_data import CoqaDatasetIndex
-from coqa_prompt import CoqaPromptParser
-from load_tracker import AsyncLoadTracker
-from trace_store import ChatCompletionTrace, InMemoryTraceStore
-from vllm_latency_sim import VllmLatencySimConfig, VllmLatencySimulator
+from predictor.data.coqa.loader import CoqaDatasetIndex
+from predictor.data.coqa.prompt import CoqaPromptParser
+from predictor.sim.load import AsyncLoadTracker
+from predictor.sim.traces import ChatCompletionTrace, InMemoryTraceStore
+from predictor.sim.latency import VllmLatencySimConfig, VllmLatencySimulator
 
 
 DEFAULT_MODEL_NAME = "fake-coqa"
