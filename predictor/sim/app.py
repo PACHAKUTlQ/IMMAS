@@ -21,7 +21,8 @@ import asyncio
 import os
 import time
 import uuid
-from typing import Any, Dict
+from contextlib import asynccontextmanager
+from typing import Any, Dict, Union
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
@@ -76,24 +77,28 @@ class CoqaAnswerOracle:
 
 
 def create_app() -> FastAPI:
-    app = FastAPI(title="Fake CoQA OpenAI API", version="0.2")
+    split = os.environ.get("COQA_SPLIT", "validation")
+    model_name = os.environ.get("FAKE_MODEL_NAME", DEFAULT_MODEL_NAME)
+
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        # Startup:
+        app.state.oracle = CoqaAnswerOracle(split=split)
+        yield
+        # Shutdown:
+        # (no-op)
+
+    app = FastAPI(title="Fake CoQA OpenAI API", version="0.2", lifespan=lifespan)
 
     app.state.trace_store = InMemoryTraceStore(
         max_size=int(os.environ.get("FAKE_TRACE_STORE_MAX", "50000"))
     )
-
-    split = os.environ.get("COQA_SPLIT", "validation")
-    model_name = os.environ.get("FAKE_MODEL_NAME", DEFAULT_MODEL_NAME)
 
     # Create these early; they are lightweight and per-process.
     app.state.load_tracker = AsyncLoadTracker(
         window_s=float(os.environ.get("FAKE_LOAD_WINDOW_S", "1.0"))
     )
     app.state.lat_sim = VllmLatencySimulator(VllmLatencySimConfig.from_env())
-
-    @app.on_event("startup")
-    def _startup() -> None:
-        app.state.oracle = CoqaAnswerOracle(split=split)
 
     @app.get("/v1/models")
     async def list_models() -> Dict[str, Any]:
@@ -136,8 +141,8 @@ def create_app() -> FastAPI:
             "window_s": snap.window_s,
         }
 
-    @app.post("/v1/chat/completions")
-    async def chat_completions(req: Request) -> Dict[str, Any]:
+    @app.post("/v1/chat/completions", response_model=None)
+    async def chat_completions(req: Request) -> Union[Dict[str, Any], JSONResponse]:
         oracle = getattr(req.app.state, "oracle", None)
         if oracle is None:
             raise HTTPException(

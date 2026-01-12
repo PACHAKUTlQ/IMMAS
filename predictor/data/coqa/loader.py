@@ -12,7 +12,7 @@ from dataclasses import dataclass
 import hashlib
 
 
-from typing import Any, Dict, Iterable, List, Mapping
+from typing import Any, Dict, Iterable, List, Mapping, cast
 
 from datasets import load_dataset
 
@@ -92,7 +92,7 @@ class CoqaDatasetIndex:
         ds = load_dataset(COQA_DATASET_NAME, split=split)
         dialogues: Dict[str, CoqaDialogue] = {}
         for ex in ds:
-            d = CoqaDialogue.from_hf_example(ex)
+            d = CoqaDialogue.from_hf_example(cast(Mapping[str, Any], ex))
             # If a collision ever happens (unlikely), later we can disambiguate by
             # adding source or answers into the hash.
             dialogues[d.dialogue_id] = d

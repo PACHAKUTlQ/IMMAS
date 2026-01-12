@@ -397,8 +397,11 @@ async def main_async() -> None:
     server_debug_timeout_s = float(os.environ.get("SERVER_DEBUG_TIMEOUT_S", "2.0"))
 
     ds = load_dataset(COQA_DATASET_NAME, split=split)
-    n = min(max_dialogues, len(ds))
-    dialogues = [CoqaDialogue.from_hf_example(ex) for ex in ds.select(range(n))]
+    dialogues = []
+    for i, ex in enumerate(ds):
+        if i >= max_dialogues:
+            break
+        dialogues.append(CoqaDialogue.from_hf_example(ex))
 
     if shuffle:
         rng = random.Random(seed)
