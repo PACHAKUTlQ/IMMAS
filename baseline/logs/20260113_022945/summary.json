@@ -1,0 +1,23 @@
+{
+  "run_id": "20260113_022945",
+  "dry_run": false,
+  "router": "randomrouter",
+  "requests": 5,
+  "batches": 2,
+  "total_model_calls": 5,
+  "chosen_model_calls": 5,
+  "error_count": 0,
+  "chosen_error_count": 0,
+  "shadow_error_count": 0,
+  "error_rate": 0.0,
+  "latency_ms": {
+    "e2e_p50": 2154.32177734375,
+    "e2e_p95": 6227.162988281249,
+    "router_p50": 1.281005859375,
+    "chosen_llm_p50": 1696.4404296875
+  },
+  "per_model_chosen": {
+    "Mistral-7B": 3,
+    "Qwen2.5-7b": 2
+  }
+}

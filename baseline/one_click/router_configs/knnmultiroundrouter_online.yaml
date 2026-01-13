@@ -1,0 +1,35 @@
+# KNNMultiRoundRouter config for one-click online experiment
+# Based on baseline/LLMRouter/configs/model_config_test/knnmultiroundrouter.yaml
+# NOTE: This router may run an internal pipeline; one_click support depends on implementation.
+
+data_path:
+  query_data_train: 'data/example_data/query_data/default_query_train.jsonl'
+  query_data_test: 'data/example_data/query_data/default_query_test.jsonl'
+  query_embedding_data: 'data/example_data/routing_data/query_embeddings_longformer.pt'
+  routing_data_train: 'data/example_data/routing_data/default_routing_train_data.jsonl'
+  routing_data_test: 'data/example_data/routing_data/default_routing_test_data.jsonl'
+  llm_data: '../one_click/llm_candidates/vllm_candidates.json'
+  llm_embedding_data: 'data/example_data/llm_candidates/default_llm_embeddings.json'
+
+model_path:
+  load_model_path: 'saved_models/knnmultiroundrouter/knnmultiroundrouter.pkl'
+
+base_model: 'meta/llama-3.1-8b-instruct'
+use_local_llm: false
+api_endpoint: 'http://127.0.0.1:8012/v1'
+api_key: null
+
+metric:
+  weights:
+    performance: 1
+    cost: 0
+    llm_judge: 0
+
+hparam:
+  n_neighbors: 5
+  weights: "uniform"
+  algorithm: "auto"
+  leaf_size: 30
+  p: 2
+  metric: "minkowski"
+  n_jobs: -1

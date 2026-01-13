@@ -1,0 +1,4 @@
+batch_id,batch_size,flush_reason,batch_duration_ms,queue_wait_p50_ms,router_p50_ms,chosen_llm_p50_ms,chosen_success_rate,shadow_calls,errors
+1,2,time,1394.36,381.02,1.60,1382.58,1.0000,0,0
+2,2,time,397.14,1866.51,0.84,384.79,1.0000,0,0
+3,1,final,360.44,1277.46,0.44,358.38,1.0000,0,0

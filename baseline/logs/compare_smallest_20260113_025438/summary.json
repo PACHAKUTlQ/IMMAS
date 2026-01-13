@@ -1,0 +1,34 @@
+{
+  "run_id": "compare_smallest_20260113_025438",
+  "dry_run": false,
+  "router": "smallest_llm",
+  "requests": 200,
+  "batches": 76,
+  "total_model_calls": 400,
+  "chosen_model_calls": 200,
+  "error_count": 0,
+  "chosen_error_count": 0,
+  "shadow_error_count": 0,
+  "error_rate": 0.0,
+  "latency_ms": {
+    "e2e_p50": 1157.7725830078125,
+    "e2e_p95": 3816.237341308593,
+    "router_p50": 1.1561279296875,
+    "chosen_llm_p50": 395.157958984375
+  },
+  "per_model_chosen": {
+    "Mistral-7B": 200
+  },
+  "chosen_task_performance": {
+    "count": 200,
+    "mean": 0.33607588094786434,
+    "p50": 0.2629310344827586,
+    "p95": 1.0
+  },
+  "per_model_chosen_task_performance": {
+    "Mistral-7B": {
+      "count": 200,
+      "mean": 0.33607588094786434
+    }
+  }
+}

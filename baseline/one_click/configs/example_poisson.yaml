@@ -1,0 +1,102 @@
+# One-click online experiment config (example)
+
+# If true: do not launch vLLM, only run online experiment.
+skip_vllm: false
+
+# If true: do not call any LLM endpoints, only validate pipeline.
+dry_run: false
+
+# vLLM servers to launch (one process per model)
+vllm:
+  launch_method: "auto"  # auto|vllm_serve|python_api_server
+  host: "127.0.0.1"
+  models:
+    - name: "Mistral-7B"
+      model_path: "mistralai/Mistral-7B-Instruct-v0.3"
+      served_model_name: "mistral-7b"
+      port: 8012
+      gpu: auto  # auto|<gpu_id>
+      tensor_parallel_size: 1
+      max_model_len: 4096
+      attention_backend: "TRITON_ATTN"
+      enforce_eager: true
+      gpu_memory_utilization: 0.90
+      min_free_mem_mb: 12000
+      per_model_max_concurrency: 4
+
+    - name: "Qwen2.5-7b"
+      model_path: "Qwen/Qwen2.5-7B-Instruct"
+      served_model_name: "qwen2.5-7b"
+      port: 8013
+      gpu: auto  # auto|<gpu_id>
+      tensor_parallel_size: 1
+      max_model_len: 4096
+      attention_backend: "TRITON_ATTN"
+      enforce_eager: true
+      gpu_memory_utilization: 0.70
+      max_num_seqs: 256
+      min_free_mem_mb: 12000
+      per_model_max_concurrency: 4
+
+# Router settings (LLMRouter)
+router:
+  name: "largest_llm"  # e.g., knnrouter/svmrouter/mlprouter/mfrouter/elorouter/dcrouter/largest_llm/smallest_llm
+  config_path: "baseline/one_click/router_configs/largest_llm_online.yaml"
+  load_model_path: null  # optional override
+
+# Candidate model mapping for LLMRouter (must match router_config llm_data path)
+# Used by this runner for shadow compare and concurrency limits.
+llm_candidates_path: "baseline/one_click/llm_candidates/vllm_candidates.json"
+
+# Request stream (Poisson arrival)
+request_stream:
+  arrival_process: "poisson"  # fixed|poisson|trace
+  poisson_qps: 2.0
+  max_requests: 50
+  max_duration_sec: 120
+
+  # Mix multiple datasets by weight
+  datasets:
+    - name: "coqa_multiturn"
+      type: "jsonl"
+      # Auto-built by baseline/run_one_click_experiment.sh if missing
+      path: "baseline/one_click/data/coqa_validation_multiturn.jsonl"
+      weight: 0.7
+      history_mode: "user_assistant"   # fixed = user_assistant (per你的确认)
+      history_turns: "all"
+      metric_mode: "em_f1"  # em_f1|online_only
+
+    - name: "single_turn_default"
+      type: "jsonl"
+      path: "baseline/LLMRouter/data/example_data/query_data/default_query_test.jsonl"
+      weight: 0.3
+      history_mode: "none"
+      metric_mode: "auto"  # reuse LLMRouter task_name default
+
+# Batching policy
+batching:
+  max_batch_size: 8
+  time_window_ms: 500
+  flush_policy: "size_then_time"  # size_then_time (per你的确认)
+
+# Online execution
+execution:
+  timeout_sec: 60
+  max_tokens: 512
+  temperature: 0.2
+
+# Shadow comparisons: call non-chosen candidates in background for debugging
+shadow_compare:
+  enabled: true
+  max_candidates_per_request: "all"   # all|number
+
+# Output
+output:
+  # run_dir is passed from shell; this is a fallback
+  run_dir: null
+  write_requests_jsonl: true
+  write_model_calls_jsonl: true
+  write_routing_decisions_jsonl: true
+  write_metrics_csv: true
+  write_summary_json: true
+  write_figures: true

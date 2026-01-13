@@ -1,0 +1,20 @@
+{
+  "run_id": "debug_fix_triton2_010157",
+  "dry_run": false,
+  "router": "largest_llm",
+  "requests": 50,
+  "batches": 19,
+  "total_model_calls": 100,
+  "chosen_model_calls": 50,
+  "error_count": 100,
+  "chosen_error_count": 50,
+  "shadow_error_count": 50,
+  "error_rate": 1.0,
+  "latency_ms": {
+    "e2e_p50": 648.160400390625,
+    "e2e_p95": 2359.984826660156,
+    "router_p50": 0.9449462890625,
+    "chosen_llm_p50": NaN
+  },
+  "per_model_chosen": {}
+}

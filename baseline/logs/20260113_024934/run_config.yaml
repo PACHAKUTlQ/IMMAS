@@ -1,0 +1,78 @@
+# Compare run (CoQA validation): LargestLLM
+
+skip_vllm: false
+dry_run: false
+
+vllm:
+  launch_method: "auto"
+  host: "127.0.0.1"
+  models:
+    - name: "Mistral-7B"
+      model_path: "mistralai/Mistral-7B-Instruct-v0.3"
+      served_model_name: "mistral-7b"
+      port: 8012
+      gpu: auto
+      tensor_parallel_size: 1
+      max_model_len: 4096
+      attention_backend: "TRITON_ATTN"
+      enforce_eager: true
+      gpu_memory_utilization: 0.90
+      min_free_mem_mb: 12000
+      per_model_max_concurrency: 4
+
+    - name: "Qwen2.5-7b"
+      model_path: "Qwen/Qwen2.5-7B-Instruct"
+      served_model_name: "qwen2.5-7b"
+      port: 8013
+      gpu: auto
+      tensor_parallel_size: 1
+      max_model_len: 4096
+      attention_backend: "TRITON_ATTN"
+      enforce_eager: true
+      gpu_memory_utilization: 0.70
+      max_num_seqs: 256
+      min_free_mem_mb: 12000
+      per_model_max_concurrency: 4
+
+router:
+  name: "largest_llm"
+  config_path: "baseline/one_click/router_configs/largest_llm_online.yaml"
+  load_model_path: null
+
+llm_candidates_path: "baseline/one_click/llm_candidates/vllm_candidates.json"
+
+request_stream:
+  arrival_process: "poisson"
+  poisson_qps: 1.0
+  max_requests: 200
+  max_duration_sec: 7200
+  datasets:
+    - name: "coqa_multiturn"
+      type: "jsonl"
+      path: "baseline/one_click/data/coqa_validation_multiturn.jsonl"
+      weight: 1.0
+      history_mode: "user_assistant"
+      history_turns: "all"
+
+batching:
+  max_batch_size: 8
+  time_window_ms: 500
+  flush_policy: "size_then_time"
+
+execution:
+  timeout_sec: 90
+  max_tokens: 256
+  temperature: 0.2
+
+shadow_compare:
+  enabled: true
+  max_candidates_per_request: "all"
+
+output:
+  run_dir: null
+  write_requests_jsonl: true
+  write_model_calls_jsonl: true
+  write_routing_decisions_jsonl: true
+  write_metrics_csv: true
+  write_summary_json: true
+  write_figures: true

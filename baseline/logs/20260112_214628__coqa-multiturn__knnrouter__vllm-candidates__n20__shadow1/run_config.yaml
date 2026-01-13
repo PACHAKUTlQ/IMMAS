@@ -1,0 +1,46 @@
+skip_vllm: true
+dry_run: true
+
+vllm:
+  host: "127.0.0.1"
+  models: []
+
+router:
+  name: "knnrouter"
+  config_path: "baseline/one_click/router_configs/knnrouter_online.yaml"
+  load_model_path: null
+
+llm_candidates_path: "baseline/one_click/llm_candidates/vllm_candidates.json"
+
+request_stream:
+  arrival_process: "poisson"
+  poisson_qps: 5.0
+  max_requests: 20
+  max_duration_sec: 30
+  datasets:
+    - name: "coqa_multiturn"
+      type: "jsonl"
+      path: "baseline/one_click/data/example_coqa_multiturn.jsonl"
+      weight: 1.0
+
+batching:
+  max_batch_size: 4
+  time_window_ms: 300
+  flush_policy: "size_then_time"
+
+execution:
+  timeout_sec: 5
+  max_tokens: 32
+  temperature: 0.2
+
+shadow_compare:
+  enabled: true
+
+output:
+  run_dir: null
+  write_requests_jsonl: true
+  write_model_calls_jsonl: true
+  write_routing_decisions_jsonl: true
+  write_metrics_csv: true
+  write_summary_json: true
+  write_figures: true

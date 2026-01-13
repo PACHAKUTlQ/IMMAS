@@ -1,0 +1,22 @@
+{
+  "run_id": "20260112_215221",
+  "dry_run": true,
+  "router": "largest_llm",
+  "requests": 20,
+  "batches": 5,
+  "total_model_calls": 40,
+  "chosen_model_calls": 20,
+  "error_count": 0,
+  "chosen_error_count": 0,
+  "shadow_error_count": 0,
+  "error_rate": 0.0,
+  "latency_ms": {
+    "e2e_p50": 118.0906982421875,
+    "e2e_p95": 429.65611572265635,
+    "router_p50": 1.285400390625,
+    "chosen_llm_p50": 10.5694580078125
+  },
+  "per_model_chosen": {
+    "Llama2-7b": 20
+  }
+}

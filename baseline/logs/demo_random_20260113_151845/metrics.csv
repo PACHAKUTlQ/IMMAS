@@ -1,0 +1,3 @@
+batch_id,batch_size,flush_reason,batch_duration_ms,queue_wait_p50_ms,router_p50_ms,chosen_llm_p50_ms,chosen_success_rate,shadow_calls,errors,chosen_task_perf_p50,chosen_total_tokens_p50,chosen_social_welfare_p50
+1,10,size,6408.84,62.83,5.41,3881.68,1.0000,0,0,0.224242,485.50,-0.253258
+2,10,size,735.86,22.75,3.72,433.81,1.0000,0,0,0.111111,433.00,-0.287889

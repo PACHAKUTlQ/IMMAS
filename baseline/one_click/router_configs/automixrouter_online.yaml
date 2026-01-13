@@ -1,0 +1,31 @@
+# AutomixRouter config for one-click online experiment
+# Based on baseline/LLMRouter/configs/model_config_test/automix.yaml
+
+data_path:
+  query_data_train: 'data/example_data/query_data/default_query_train.jsonl'
+  query_data_test: 'data/example_data/query_data/default_query_test.jsonl'
+  routing_data_train: 'data/example_data/routing_data/default_routing_train_data.jsonl'
+  routing_data_test: 'data/example_data/routing_data/default_routing_test_data.jsonl'
+  llm_data: '../one_click/llm_candidates/vllm_candidates.json'
+  llm_embedding_data: 'data/example_data/llm_candidates/default_llm_embeddings.json'
+
+model_path: {}
+
+metric:
+  weights:
+    performance: 1
+    cost: 0
+    llm_judge: 0
+
+hparam:
+  routing_method: "POMDP"
+  num_bins: 8
+  inference_mode: true
+  small_model_cost: 1
+  large_model_cost: 50
+  verifier_cost: 1
+  device: "cpu"
+  verbose: false
+  cost_constraint: null
+  max_workers: 1
+  min_samples: 5

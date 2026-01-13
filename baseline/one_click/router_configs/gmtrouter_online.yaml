@@ -1,0 +1,29 @@
+# GMTRouter config for one-click online experiment
+# Based on baseline/LLMRouter/configs/model_config_test/gmtrouter.yaml
+# NOTE: GMTRouter expects user/session context; one_click request format may need adaptation.
+
+dataset:
+  name: mt_bench
+  path: ./data
+
+gmt_config:
+  num_gnn_layers: 2
+  hidden_dim: 128
+  dropout: 0.1
+  personalization: true
+  record_per_user: 10
+  multi_turn: false
+  aggregation_type: mean
+
+data_path:
+  data_root: ./data
+  test_set: ./data/mt_bench/test_set.jsonl
+
+model_path:
+  checkpoint_root: ./models
+  load_model_path: ./models/gmtrouter_checkpoint.pt
+
+inference:
+  batch_size: 32
+  device: cuda
+  eval_metric: auc

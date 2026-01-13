@@ -1,0 +1,56 @@
+{
+  "run_id": "demo_random_20260113_151507",
+  "dry_run": false,
+  "router": "largest_llm",
+  "requests": 5,
+  "batches": 3,
+  "total_model_calls": 5,
+  "chosen_model_calls": 5,
+  "error_count": 0,
+  "chosen_error_count": 0,
+  "shadow_error_count": 0,
+  "error_rate": 0.0,
+  "latency_ms": {
+    "e2e_p50": 2270.005615234375,
+    "e2e_p95": 8287.97607421875,
+    "router_p50": 0.991943359375,
+    "chosen_llm_p50": 358.061767578125
+  },
+  "per_model_chosen": {
+    "Mistral-7B": 5
+  },
+  "chosen_task_performance": {
+    "count": 5,
+    "mean": 0.31382395382395384,
+    "p50": 0.18181818181818182,
+    "p95": 0.7288888888888889
+  },
+  "per_model_chosen_task_performance": {
+    "Mistral-7B": {
+      "count": 5,
+      "mean": 0.31382395382395384
+    }
+  },
+  "chosen_token_usage": {
+    "count": 5,
+    "mean": 460.0,
+    "p50": 460.0,
+    "p95": 481.6,
+    "token_cost_field": "total_tokens",
+    "token_cost_weight": 0.001
+  },
+  "per_model_chosen_token_usage": {
+    "Mistral-7B": {
+      "count": 5,
+      "mean": 460.0
+    }
+  },
+  "chosen_social_welfare": {
+    "count": 5,
+    "total": -0.7308802308802309,
+    "mean": -0.14617604617604618,
+    "p50": -0.2781818181818182,
+    "p95": 0.2574888888888888,
+    "definition": "sum_i (task_performance_i - token_cost_weight * token_cost_i) over chosen calls"
+  }
+}

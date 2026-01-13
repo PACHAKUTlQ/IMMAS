@@ -1,0 +1,22 @@
+{
+  "run_id": "20260113_011428",
+  "dry_run": false,
+  "router": "largest_llm",
+  "requests": 45,
+  "batches": 15,
+  "total_model_calls": 90,
+  "chosen_model_calls": 45,
+  "error_count": 0,
+  "chosen_error_count": 0,
+  "shadow_error_count": 0,
+  "error_rate": 0.0,
+  "latency_ms": {
+    "e2e_p50": 2078.836669921875,
+    "e2e_p95": 10960.391943359375,
+    "router_p50": 1.05615234375,
+    "chosen_llm_p50": 1060.872802734375
+  },
+  "per_model_chosen": {
+    "Mistral-7B": 45
+  }
+}
