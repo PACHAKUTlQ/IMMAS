@@ -84,18 +84,18 @@ Run simulated vllm server in terminal session 1:
 
 ```bash
 export HF_ENDPOINT=https://hf-mirror.com
-uv run uvicorn predictor.sim.app:app --reload
+uv run uvicorn immas.sim.app:app --reload
 ```
 
 Run client in terminal session 2:
 
 ```bash
 export HF_ENDPOINT=https://hf-mirror.com
-MAX_DIALOGUES=64 MAX_TURNS=5 MAX_CONCURRENCY=32 VERBOSE=1 RUN_LOG_PATH=coqa_run.jsonl uv run -m predictor.client.runners.coqa_runner
+MAX_DIALOGUES=64 MAX_TURNS=5 MAX_CONCURRENCY=32 VERBOSE=1 RUN_LOG_PATH=coqa_run.jsonl uv run -m immas.client.runners.coqa_runner
 ```
 
 Analyze data in terminal session 3:
 
 ```bash
-uv run -m predictor.analysis.run_analyzer --log coqa_run.jsonl --outdir run_analysis
+uv run -m immas.analysis.run_analyzer --log coqa_run.jsonl --outdir run_analysis
 ```
