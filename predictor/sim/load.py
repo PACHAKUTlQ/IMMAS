@@ -5,9 +5,8 @@ We track:
 - in-flight requests (per-process)
 - approximate recent request rate over a sliding window (requests/second)
 
-This is intentionally per-process. If you run multiple Uvicorn workers,
-each worker will track its own load (which is usually what you want for a
-single-GPU-per-process simulation).
+This is intentionally per-process. If run multiple Uvicorn workers,
+each worker will track its own load.
 """
 
 from __future__ import annotations
@@ -49,7 +48,7 @@ class AsyncLoadTracker:
 
     Notes
     -----
-    - Use `async with tracker.track():` around the work you want counted as "in-flight".
+    - Use `async with tracker.track():` around the work counted as "in-flight".
     - The tracker holds a lock only during counter updates, not during request work.
     """
 

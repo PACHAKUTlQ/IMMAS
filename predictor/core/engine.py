@@ -4,7 +4,7 @@ Online predictor for latency/cost/performance.
 This is intentionally small but structured:
 - Feature construction is centralized
 - Uses River pipelines with OneHotEncoder to avoid manual one-hot bookkeeping
-- Outputs keep the "value + dummy_std" shape for compatibility with UCB-style code
+- Outputs keep the "value + dummy_std"
 """
 
 from __future__ import annotations
@@ -63,7 +63,7 @@ class AgentPredictor:
         """
         Build a feature dict.
 
-        This is where you will progressively add:
+        Progressively add:
         - queue/backlog
         - model-side KV cache state (eviction pressure)
         - output-length estimates

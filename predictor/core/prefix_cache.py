@@ -30,7 +30,7 @@ class TextPrefixCache:
 
         In this basic version:
     - We only track per-dialogue prefix, because cross-dialogue prefix reuse is rare.
-    - We do not implement eviction; later you can add LRU/size constraints.
+    - We do not implement eviction; later can add LRU/size constraints.
     """
 
     def __init__(self) -> None:
