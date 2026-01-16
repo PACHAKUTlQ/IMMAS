@@ -91,11 +91,11 @@ Run client in terminal session 2:
 
 ```bash
 export HF_ENDPOINT=https://hf-mirror.com
-MAX_DIALOGUES=64 MAX_TURNS=5 MAX_CONCURRENCY=32 VERBOSE=1 RUN_LOG_PATH=coqa_run.jsonl uv run -m immas.client.runners.coqa_runner
+MAX_DIALOGUES=64 MAX_TURNS=5 MAX_CONCURRENCY=32 VERBOSE=1 RUN_LOG_PATH=router_run.jsonl uv run -m immas.client.runners.coqa_loadgen
 ```
 
 Analyze data in terminal session 3:
 
 ```bash
-uv run -m immas.analysis.run_analyzer --log coqa_run.jsonl --outdir run_analysis
+uv run -m immas.analysis.run_analyzer --log router_run.jsonl --outdir run_analysis
 ```
