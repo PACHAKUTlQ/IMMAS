@@ -1,9 +1,3 @@
-"""
-immas.router.logger
-
-Async JSONL logging for router-side training and analysis.
-"""
-
 from __future__ import annotations
 
 import asyncio
@@ -29,20 +23,29 @@ class RouterLogRecord:
     dialogue_id: str
     turn_number: int
 
+    # Router-known decision-time features
     prompt_chars: int
-    kvmatch: float
+    kvmatch_text: float
     router_inflight: int
     router_rps_1s: float
 
+    # Predictions
     pred_latency_ms: float
     pred_cost_tokens: float
     pred_perf_prob: float
+    pred_cache_ratio: float
 
+    # Observations
     completion_id: str
     obs_latency_ms: float
-    obs_total_tokens: int
-    correct: bool
 
+    obs_prompt_tokens: int
+    obs_completion_tokens: int
+    obs_total_tokens: int
+    obs_cached_tokens: int
+    obs_cache_ratio: float
+
+    correct: bool
     error: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
