@@ -1,4 +1,6 @@
 """
+immas.data.coqa.prompt
+
 Prompt formatting/parsing shared by server and client.
 
 Key goals:

@@ -1,4 +1,6 @@
 """
+immas.data.coqa.loader
+
 Utilities for loading and indexing the CoQA dataset.
 
 This module is shared by both the fake API server and the client to keep data
