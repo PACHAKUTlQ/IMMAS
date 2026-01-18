@@ -41,7 +41,7 @@ def _make_initial_messages(dialogue: CoqaDialogue) -> List[Dict[str, Any]]:
     # Keep the initial prefix stable and deterministic.
     system = {
         "role": "system",
-        "content": "Answer the user's questions using the story. Be concise and factual.",
+        "content": "Answer the user's questions using the story. Be factual. Think very carefully and show your thinking steps, and then output the answer at the last line, below your thinking.",
     }
     story_msg = {
         "role": "user",
