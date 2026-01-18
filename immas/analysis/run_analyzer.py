@@ -162,6 +162,10 @@ def main() -> None:
     args = ap.parse_args()
 
     log_path = Path(args.log)
+    if not log_path.exists():
+        print(f"Log file not found: {log_path}")
+        return
+
     records = load_jsonl(log_path)
 
     if args.run_id:
@@ -357,8 +361,8 @@ def main() -> None:
     # Scatter: predicted vs observed latency
     plt.figure(figsize=(6, 6))
     plt.scatter(pred_lat, obs_lat, s=10, alpha=0.6)
-    lo = min(min(pred_lat), min(obs_lat))
-    hi = max(max(pred_lat), max(obs_lat))
+    lo = min(min(pred_lat), min(obs_lat)) if pred_lat and obs_lat else 0
+    hi = max(max(pred_lat), max(obs_lat)) if pred_lat and obs_lat else 1
     plt.plot([lo, hi], [lo, hi], linestyle="--", linewidth=1, color="black", alpha=0.5)
     plt.title("Predicted vs observed latency")
     plt.xlabel("predicted latency (ms)")
@@ -389,15 +393,16 @@ def main() -> None:
         plt.close()
 
     # Scatter: observed cache ratio vs observed latency
-    plt.figure(figsize=(6, 6))
-    plt.scatter(obs_cache_ratio, obs_lat, s=10, alpha=0.6)
-    plt.title("Observed cache ratio vs observed latency")
-    plt.xlabel("obs_cache_ratio")
-    plt.ylabel("obs_latency_ms")
-    plt.xlim(-0.05, 1.05)
-    plt.tight_layout()
-    plt.savefig(outdir / "obs_cache_ratio_vs_latency.png", dpi=160)
-    plt.close()
+    if obs_cache_ratio and obs_lat:
+        plt.figure(figsize=(6, 6))
+        plt.scatter(obs_cache_ratio, obs_lat, s=10, alpha=0.6)
+        plt.title("Observed cache ratio vs observed latency")
+        plt.xlabel("obs_cache_ratio")
+        plt.ylabel("obs_latency_ms")
+        plt.xlim(-0.05, 1.05)
+        plt.tight_layout()
+        plt.savefig(outdir / "obs_cache_ratio_vs_latency.png", dpi=160)
+        plt.close()
 
     print(f"\nWrote plots to: {outdir.resolve()}")
 
