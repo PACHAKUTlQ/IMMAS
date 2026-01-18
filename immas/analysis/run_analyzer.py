@@ -9,7 +9,7 @@ Outputs
   - predicted cache ratio vs observed cache ratio
 - Top latency outliers (with cache/token context)
 - Suspicious cases (high prefix match but low cached tokens, etc.)
-- Conversation-ordered CSV so you can inspect turns for each dialogue in order
+- Conversation-ordered CSV (turns_sorted.csv) for debugging KV cache behavior per dialogue.
 - Plots (if matplotlib is available)
 """
 
@@ -101,6 +101,13 @@ def _short_id(dialogue_id: str, n: int = 12) -> str:
     return dialogue_id if len(dialogue_id) <= n else dialogue_id[:n]
 
 
+def _csv_fmt(val: Any) -> str:
+    """Format floats to 3 decimals, otherwise stringify."""
+    if isinstance(val, float):
+        return f"{val:.3f}"
+    return str(val) if val is not None else ""
+
+
 def _write_turns_csv(*, out_path: Path, records: Sequence[Mapping[str, Any]]) -> None:
     """
     Write a conversation-ordered CSV (sorted by dialogue_id, then turn_number, then t_start_monotonic).
@@ -109,6 +116,8 @@ def _write_turns_csv(*, out_path: Path, records: Sequence[Mapping[str, Any]]) ->
     - prompt_tokens progression
     - cached_tokens and cache ratio
     - whether cache reuse aligns with kvmatch_text
+
+    Floats are formatted to 3 decimal places.
     """
     cols = [
         "run_id",
@@ -142,7 +151,8 @@ def _write_turns_csv(*, out_path: Path, records: Sequence[Mapping[str, Any]]) ->
         w = csv.DictWriter(f, fieldnames=cols)
         w.writeheader()
         for r in records:
-            row = {c: r.get(c, "") for c in cols}
+            # Create a row dict where every value is formatted
+            row = {c: _csv_fmt(r.get(c)) for c in cols}
             w.writerow(row)
 
 
