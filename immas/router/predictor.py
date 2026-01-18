@@ -1,10 +1,9 @@
 """
+immas.router.predictor
+
 Online predictor for latency/cost/performance.
 
-This is intentionally small but structured:
-- Feature construction is centralized
-- Uses River pipelines with OneHotEncoder to avoid manual one-hot bookkeeping
-- Outputs keep the "value + dummy_std"
+Predicts router-observed E2E latency; later you can change this to TTFT.
 """
 
 from __future__ import annotations
@@ -21,7 +20,7 @@ MetricPred = Tuple[float, float]
 
 @dataclass(frozen=True, slots=True)
 class PredictorInput:
-    """Inputs known at routing time (basic version)."""
+    """Inputs known at routing time."""
 
     model: str
     source: str
@@ -29,19 +28,16 @@ class PredictorInput:
     turn_number: int
     prompt_text: str
     kvmatch: float
-    client_inflight: int = 0
-    client_rps_1s: float = 0.0
+
+    router_inflight: int = 0
+    router_rps_1s: float = 0.0
 
 
 class AgentPredictor:
     """
     Online predictor for (latency_ms, cost_tokens, performance_prob).
 
-    Notes
-    -----
-    - Latency is measured end-to-end wall time in this basic version.
-    - Cost tokens are a crude proxy from the fake API (char-based).
-    - Performance is correctness vs gold; with the fake API it's mainly a sanity check.
+    Uses incremental learners from `river`.
     """
 
     def __init__(self) -> None:
@@ -60,15 +56,6 @@ class AgentPredictor:
         )
 
     def make_features(self, inp: PredictorInput) -> Features:
-        """
-        Build a feature dict.
-
-        Progressively add:
-        - queue/backlog
-        - model-side KV cache state (eviction pressure)
-        - output-length estimates
-        - etc.
-        """
         return {
             "bias": 1.0,
             "model": inp.model,
@@ -76,23 +63,11 @@ class AgentPredictor:
             "turn_number": float(inp.turn_number),
             "prompt_chars": float(len(inp.prompt_text)),
             "kvmatch": float(inp.kvmatch),
-            "client_inflight": float(inp.client_inflight),
-            "client_rps_1s": float(inp.client_rps_1s),
+            "router_inflight": float(inp.router_inflight),
+            "router_rps_1s": float(inp.router_rps_1s),
         }
 
     def predict(self, inp: PredictorInput) -> Dict[str, MetricPred]:
-        """
-        Predict metrics.
-
-        Returns
-        -------
-        dict
-            {
-              "latency_ms": (value, std_placeholder),
-              "cost_tokens": (value, std_placeholder),
-              "performance": (prob_correct, std_placeholder),
-            }
-        """
         x = self.make_features(inp)
 
         lat = self.model_latency.predict_one(x)

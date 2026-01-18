@@ -1,7 +1,7 @@
 """
-Structured JSONL logging for parallel experiments.
+immas.router.logger
 
-Writes one JSON object per request so logs remain parseable under concurrency.
+Async JSONL logging for router-side training and analysis.
 """
 
 from __future__ import annotations
@@ -14,12 +14,15 @@ from typing import Any, Dict, Optional, Union
 
 
 @dataclass(frozen=True, slots=True)
-class RequestLogRecord:
-    """One request/response record suitable for JSONL."""
+class RouterLogRecord:
+    """One router request/response record suitable for JSONL."""
 
     run_id: str
     t_start_monotonic: float
     t_end_monotonic: float
+
+    backend_id: str
+    backend_base_url_v1: str
 
     model: str
     source: str
@@ -28,8 +31,8 @@ class RequestLogRecord:
 
     prompt_chars: int
     kvmatch: float
-    client_inflight: int
-    client_rps_1s: float
+    router_inflight: int
+    router_rps_1s: float
 
     pred_latency_ms: float
     pred_cost_tokens: float
@@ -40,14 +43,6 @@ class RequestLogRecord:
     obs_total_tokens: int
     correct: bool
 
-    # Optional server debug trace (flattened)
-    srv_sim_ttft_s: Optional[float] = None
-    srv_sim_total_s: Optional[float] = None
-    srv_sim_stall_s: Optional[float] = None
-    srv_utilization: Optional[float] = None
-    srv_effective_inflight: Optional[int] = None
-    srv_rps: Optional[float] = None
-
     error: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
@@ -56,11 +51,7 @@ class RequestLogRecord:
 
 
 class AsyncJsonlLogger:
-    """
-    Async JSONL logger with a background writer task.
-
-    This avoids interleaved prints and keeps disk writes serialized.
-    """
+    """Async JSONL logger with a single background writer task."""
 
     def __init__(
         self, path: str, *, append: bool = False, flush_every: int = 1
@@ -81,10 +72,9 @@ class AsyncJsonlLogger:
     async def __aexit__(self, exc_type, exc, tb) -> None:
         await self.close()
 
-    async def log(self, record: Union[RequestLogRecord, Dict[str, Any]]) -> None:
-        """Enqueue one record (non-blocking except for queue backpressure)."""
+    async def log(self, record: Union[RouterLogRecord, Dict[str, Any]]) -> None:
         payload = (
-            record.to_dict() if isinstance(record, RequestLogRecord) else dict(record)
+            record.to_dict() if isinstance(record, RouterLogRecord) else dict(record)
         )
         await self._q.put(payload)
 

@@ -1,5 +1,9 @@
 # Predictor Framework Documentation
 
+> [!warning]
+>
+> This documentation is outdated.
+
 ## Overview
 
 The **Predictor** framework is a simulation and experimentation environment designed to model, measure, and predict the performance characteristics (latency, cost, and correctness) of Large Language Model (LLM) serving systems.

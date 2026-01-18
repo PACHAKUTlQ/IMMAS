@@ -14,7 +14,7 @@ import os
 import random
 from dataclasses import dataclass
 
-from predictor.sim.load import LoadSnapshot
+from immas.sim.load import LoadSnapshot
 
 
 def _env_bool(name: str, default: bool) -> bool:
