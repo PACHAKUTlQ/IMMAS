@@ -7,11 +7,9 @@ extraction consistent and reduce "it works on my machine" mismatches.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-
 import hashlib
 
-
+from dataclasses import dataclass
 from typing import Any, Dict, Iterable, List, Mapping, cast
 
 from datasets import load_dataset
