@@ -126,7 +126,7 @@ def main() -> None:
     outdir.mkdir(parents=True, exist_ok=True)
 
     try:
-        import matplotlib.pyplot as plt  # type: ignore
+        import matplotlib.pyplot as plt
     except Exception:
         print("\nmatplotlib not available; skipping plots.")
         return
