@@ -26,6 +26,8 @@ class RouterLogRecord:
 
     # Router-known decision-time features
     prompt_chars: int
+    cached_prompt_chars: int
+    kvmatch_lcp_chars: int
     kvmatch_text: float
     router_inflight: int
     router_rps_1s: float

@@ -183,12 +183,15 @@ def create_app() -> FastAPI:
 
         # Compute kvmatch against router cache
         async with cache_lock:
-            kvmatch_text = cache.match_ratio(
+            pm = cache.match(
                 backend_id=backend.backend_id,
                 model=model,
                 dialogue_id=dialogue_id,
                 prompt_text=prompt_repr,
             )
+        kvmatch_text = float(pm.ratio)
+        cached_prompt_chars = int(pm.cached_chars)
+        kvmatch_lcp_chars = int(pm.lcp_chars)
 
         async with load_tracker.track() as load:
             inp = PredictorInput(
@@ -283,6 +286,8 @@ def create_app() -> FastAPI:
             dialogue_id=dialogue_id,
             turn_number=int(turn_number),
             prompt_chars=int(prompt_chars),
+            cached_prompt_chars=int(cached_prompt_chars),
+            kvmatch_lcp_chars=int(kvmatch_lcp_chars),
             kvmatch_text=float(kvmatch_text),
             router_inflight=int(inp.router_inflight),
             router_rps_1s=float(inp.router_rps_1s),
