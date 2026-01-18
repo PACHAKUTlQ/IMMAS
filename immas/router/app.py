@@ -39,6 +39,9 @@ _HEADER_RUN_ID = "x-immas-run-id"
 _HEADER_DIALOGUE_ID = "x-immas-dialogue-id"
 _HEADER_TURN_NUMBER = "x-immas-turn-number"
 _HEADER_SOURCE = "x-immas-source"
+_PASSTHROUGH_HEADERS = (
+    "authorization",  # Bearer <API_KEY>
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -61,7 +64,7 @@ def _env_bool(name: str, default: bool) -> bool:
 
 def _load_config() -> RouterConfig:
     """
-    Phase 0: single backend configured by env.
+    Single backend configured by env.
     Later: extend to multiple backends.
     """
     backend_base_url_v1 = os.environ.get(
@@ -90,6 +93,20 @@ def _parse_turn_number(raw: str) -> int:
         return n if n >= 0 else 0
     except Exception:
         return 0
+
+
+def _backend_passthrough_headers(req: Request) -> dict[str, str]:
+    """
+    Extract a safe subset of inbound headers (e.g. Authorization) that should be forwarded to the backend.
+    """
+
+    out: dict[str, str] = {}
+    for h in _PASSTHROUGH_HEADERS:
+        v = req.headers.get(h)
+        if v:
+            out[h] = v
+
+    return out
 
 
 def create_app() -> FastAPI:
@@ -193,16 +210,21 @@ def create_app() -> FastAPI:
             pred_perf_prob = float(pred["performance"][0])
             pred_cache_ratio = float(pred["cache_ratio"][0])
 
-            # Forward (and forward IMMAS headers too; harmless for vLLM, useful for fake backend)
-            t0 = time.perf_counter()
-            status, resp_json = await backend.forward_chat_completions(
-                body,
-                headers={
+            backend_headers = _backend_passthrough_headers(req)
+            backend_headers.update(
+                {
                     "X-IMMAS-RUN-ID": run_id,
                     "X-IMMAS-DIALOGUE-ID": dialogue_id,
                     "X-IMMAS-TURN-NUMBER": str(turn_number),
                     "X-IMMAS-SOURCE": source,
-                },
+                }
+            )
+
+            # Forward to backend + observe
+            t0 = time.perf_counter()
+            status, resp_json = await backend.forward_chat_completions(
+                body,
+                headers=backend_headers,
             )
             t1 = time.perf_counter()
 

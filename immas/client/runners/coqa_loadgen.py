@@ -133,6 +133,7 @@ async def main_async() -> None:
     split = os.environ.get("COQA_SPLIT", "validation")
     model_name = os.environ.get("MODEL_NAME", "fake-coqa")
     openai_base_url_v1 = os.environ.get("OPENAI_BASE_URL", "http://localhost:9000/v1")
+    api_key = os.environ.get("OPENAI_API_KEY", "sk-local")
 
     max_dialogues = int(os.environ.get("MAX_DIALOGUES", "3"))
     max_turns_per_dialogue = int(os.environ.get("MAX_TURNS", "5"))
@@ -186,7 +187,7 @@ async def main_async() -> None:
     print(f"Router base_url={openai_base_url_v1}")
     print("============================================================")
 
-    openai_client = AsyncOpenAI(base_url=openai_base_url_v1, api_key="sk-local")
+    openai_client = AsyncOpenAI(base_url=openai_base_url_v1, api_key=api_key)
 
     try:
         tasks = [
