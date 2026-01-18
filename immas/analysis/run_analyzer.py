@@ -131,6 +131,8 @@ def _write_turns_csv(*, out_path: Path, records: Sequence[Mapping[str, Any]]) ->
         "obs_latency_ms",
         "pred_cost_tokens",
         "obs_total_tokens",
+        "router_inflight",
+        "router_rps_1s",
         "error",
         "completion_id",
     ]
