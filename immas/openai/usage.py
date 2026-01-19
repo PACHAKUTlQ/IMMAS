@@ -67,9 +67,7 @@ def parse_usage(resp_json: Any) -> ParsedUsage:
     if completion_tokens == 0:
         completion_tokens = _int(usage.get("output_tokens"))
     if total_tokens == 0:
-        total_tokens = _int(usage.get("total_tokens")) or (
-            prompt_tokens + completion_tokens
-        )
+        total_tokens = prompt_tokens + completion_tokens
 
     cached_tokens = 0
 
