@@ -34,6 +34,7 @@ def quantile(xs: Sequence[float], q: float) -> float:
 
     Returns 0.0 on empty input.
     """
+
     if not xs:
         return 0.0
     q = max(0.0, min(1.0, float(q)))
@@ -90,6 +91,7 @@ def r2_score(pred: Sequence[float], obs: Sequence[float]) -> float:
 
     Returns 0.0 if undefined (n < 2 or zero variance in obs).
     """
+
     n = min(len(pred), len(obs))
     if n < 2:
         return 0.0
@@ -142,6 +144,7 @@ def _pairs(
     This function skips records where either value is missing (None) or not
     convertible to float, to avoid silently injecting zeros.
     """
+
     pred: List[float] = []
     obs: List[float] = []
     for r in records:
@@ -174,6 +177,7 @@ def _short_id(dialogue_id: str, n: int = 12) -> str:
 
 def _csv_fmt(val: Any) -> str:
     """Format floats to 3 decimals, otherwise stringify (blank for NaN/Inf)."""
+
     if isinstance(val, float):
         if math.isnan(val) or math.isinf(val):
             return ""
