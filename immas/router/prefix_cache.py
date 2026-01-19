@@ -82,7 +82,7 @@ class TextPrefixCache:
             )
 
         lcp = common_prefix_length(cached, prompt_text)
-        ratio = float(lcp) / float(prompt_chars) if prompt_chars > 0 else 0.0
+        ratio = float(lcp) / float(prompt_chars)
         ratio = max(0.0, min(1.0, ratio))
 
         return PrefixMatch(
