@@ -13,24 +13,16 @@ from __future__ import annotations
 import asyncio
 import os
 import random
-import re
 import time
+
 from dataclasses import dataclass
-from typing import List, Tuple
+from typing import Any, Dict, List
 
 from datasets import load_dataset
 from openai import AsyncOpenAI
 from tqdm import tqdm
 
 from immas.data.coqa.loader import COQA_DATASET_NAME, CoqaDialogue
-from immas.data.coqa.prompt import CoqaPromptFormatter
-
-
-HistoryTurn = Tuple[str, str]
-
-
-def normalize_eval(text: str) -> str:
-    return re.sub(r"\s+", " ", text.strip()).lower()
 
 
 def short_dialogue_id(dialogue_id: str, n: int = 10) -> str:
@@ -43,6 +35,19 @@ class GlobalStats:
     n_errors: int = 0
     total_latency_ms: float = 0.0
     total_tokens: int = 0
+
+
+def _make_initial_messages(dialogue: CoqaDialogue) -> List[Dict[str, Any]]:
+    # Keep the initial prefix stable and deterministic.
+    system = {
+        "role": "system",
+        "content": "Answer the user's questions using the story. Be factual. Think very carefully and show your thinking steps, and then output the answer at the last line, below your thinking.",
+    }
+    story_msg = {
+        "role": "user",
+        "content": f"Story (source={dialogue.source}, id={dialogue.dialogue_id}):\n{dialogue.story}",
+    }
+    return [system, story_msg]
 
 
 async def run_dialogue(
@@ -60,34 +65,22 @@ async def run_dialogue(
     print_lock: asyncio.Lock,
     run_id: str,
 ) -> None:
-    history: List[HistoryTurn] = []
+    messages: List[Dict[str, Any]] = _make_initial_messages(dialogue)
     n_turns = min(dialogue.num_turns(), max_turns)
 
     for turn_idx in range(n_turns):
         turn_number = turn_idx + 1
         question = dialogue.questions[turn_idx]
 
-        prompt = CoqaPromptFormatter.format_turn(
-            dialogue_id=dialogue.dialogue_id,
-            source=dialogue.source,
-            story=dialogue.story,
-            history=history,
-            question=question,
-            turn_number=turn_number,
-        )
+        # Append the new user turn; do NOT rewrite prior turns.
+        messages.append({"role": "user", "content": f"Q{turn_number}: {question}"})
 
         async with send_sem:
             t0 = time.perf_counter()
             try:
                 resp = await openai_client.chat.completions.create(
                     model=model_name,
-                    messages=[
-                        {
-                            "role": "system",
-                            "content": "Answer the question using the story and the conversation.",
-                        },
-                        {"role": "user", "content": prompt},
-                    ],
+                    messages=messages,
                     temperature=0,
                     max_tokens=64,
                     extra_headers={
@@ -113,12 +106,12 @@ async def run_dialogue(
             t1 = time.perf_counter()
 
         obs_latency_ms = (t1 - t0) * 1000.0
-        answer = (resp.choices[0].message.content or "").strip()
+        answer = resp.choices[0].message.content or ""  # IMPORTANT: no .strip()
         usage = getattr(resp, "usage", None)
         obs_total_tokens = int(getattr(usage, "total_tokens", 0) or 0)
 
-        # Continue dialogue history using model output (even if dataset doesn't depend on it).
-        history.append((question, answer))
+        # Append assistant turn verbatim so next request reuses exact prefix
+        messages.append({"role": "assistant", "content": answer})
 
         async with stats_lock:
             stats.n_requests += 1
@@ -139,9 +132,9 @@ async def run_dialogue(
 
 async def main_async() -> None:
     split = os.environ.get("COQA_SPLIT", "validation")
-    model_name = os.environ.get("FAKE_MODEL_NAME", "fake-coqa")
-
+    model_name = os.environ.get("MODEL_NAME", "fake-coqa")
     openai_base_url_v1 = os.environ.get("OPENAI_BASE_URL", "http://localhost:9000/v1")
+    api_key = os.environ.get("OPENAI_API_KEY", "sk-local")
 
     max_dialogues = int(os.environ.get("MAX_DIALOGUES", "3"))
     max_turns_per_dialogue = int(os.environ.get("MAX_TURNS", "5"))
@@ -195,7 +188,7 @@ async def main_async() -> None:
     print(f"Router base_url={openai_base_url_v1}")
     print("============================================================")
 
-    openai_client = AsyncOpenAI(base_url=openai_base_url_v1, api_key="sk-local")
+    openai_client = AsyncOpenAI(base_url=openai_base_url_v1, api_key=api_key)
 
     try:
         tasks = [

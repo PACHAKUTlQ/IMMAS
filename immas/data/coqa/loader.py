@@ -1,4 +1,6 @@
 """
+immas.data.coqa.loader
+
 Utilities for loading and indexing the CoQA dataset.
 
 This module is shared by both the fake API server and the client to keep data
@@ -7,11 +9,9 @@ extraction consistent and reduce "it works on my machine" mismatches.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-
 import hashlib
 
-
+from dataclasses import dataclass
 from typing import Any, Dict, Iterable, List, Mapping, cast
 
 from datasets import load_dataset
