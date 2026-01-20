@@ -3,15 +3,11 @@ immas.router.app
 
 A lightweight OpenAI-compatible router that:
 - receives /v1/chat/completions
-- computes prediction-time features (including text-based KV match proxy)
-- selects a backend (single backend; routing is pluggable)
-- forwards the request to the backend
+- computes router-side features (including text-based KV match proxy)
+- selects a backend (currently: round-robin)
+- forwards the request to the chosen backend
 - logs + online-trains a predictor based on observed outcomes
-
--------------
-- We measure observed latency as end-to-end (E2E) wall time at the router.
-- Correctness is set to True (placeholder).
-- The backend is expected to speak OpenAI-compatible HTTP+JSON.
+- uses backend API keys from its own YAML configuration.
 """
 
 from __future__ import annotations
@@ -21,7 +17,6 @@ import os
 import time
 
 from contextlib import asynccontextmanager
-from dataclasses import dataclass
 from typing import Any, Optional
 
 from fastapi import FastAPI, Request
@@ -31,6 +26,7 @@ from immas.common.load import AsyncLoadTracker
 from immas.openai.chat import extract_first_assistant_message, serialize_chat_messages
 from immas.openai.usage import parse_usage
 from immas.router.backend import HttpOpenAIBackend, OpenAIBackend
+from immas.router.config import RouterAppConfig, load_router_app_config
 from immas.router.logger import AsyncJsonlLogger, RouterLogRecord
 from immas.router.predictor import AgentPredictor, PredictorInput
 from immas.router.prefix_cache import TextPrefixCache
@@ -40,48 +36,6 @@ _HEADER_RUN_ID = "x-immas-run-id"
 _HEADER_DIALOGUE_ID = "x-immas-dialogue-id"
 _HEADER_TURN_NUMBER = "x-immas-turn-number"
 _HEADER_SOURCE = "x-immas-source"
-_PASSTHROUGH_HEADERS = (
-    "authorization",  # Bearer <API_KEY>
-)
-
-
-@dataclass(frozen=True, slots=True)
-class RouterConfig:
-    """Runtime configuration for the router."""
-
-    backend_id: str
-    backend_base_url_v1: str
-
-    log_path: str
-    log_append: bool
-
-
-def _env_bool(name: str, default: bool) -> bool:
-    v = os.environ.get(name)
-    if v is None:
-        return default
-    return v.strip().lower() in {"1", "true", "yes", "y", "on"}
-
-
-def _load_config() -> RouterConfig:
-    """
-    Single backend configured by env.
-    Later: extend to multiple backends.
-    """
-    backend_base_url_v1 = os.environ.get(
-        "IMMAS_BACKEND_BASE_URL", "http://localhost:8000/v1"
-    ).strip()
-    backend_id = os.environ.get("IMMAS_BACKEND_ID", "b0").strip()
-
-    log_path = os.environ.get("IMMAS_ROUTER_LOG_PATH", "router_run.jsonl")
-    log_append = _env_bool("IMMAS_ROUTER_LOG_APPEND", False)
-
-    return RouterConfig(
-        backend_id=backend_id,
-        backend_base_url_v1=backend_base_url_v1,
-        log_path=log_path,
-        log_append=log_append,
-    )
 
 
 def _get_header(req: Request, name: str) -> str:
@@ -91,27 +45,71 @@ def _get_header(req: Request, name: str) -> str:
 def _parse_turn_number(raw: str) -> int:
     try:
         n = int(raw)
+
         return n if n >= 0 else 0
     except Exception:
         return 0
 
 
-def _backend_passthrough_headers(req: Request) -> dict[str, str]:
+def _load_cfg_from_env() -> RouterAppConfig:
     """
-    Extract a safe subset of inbound headers (e.g. Authorization) that should be forwarded to the backend.
+    Load router config from YAML path in env IMMAS_ROUTER_CONFIG.
+
+    This is the primary configuration mechanism going forward.
     """
 
-    out: dict[str, str] = {}
-    for h in _PASSTHROUGH_HEADERS:
-        v = req.headers.get(h)
-        if v:
-            out[h] = v
+    path = (os.environ.get("IMMAS_ROUTER_CONFIG") or "").strip()
+    if not path:
+        raise RuntimeError(
+            "Missing IMMAS_ROUTER_CONFIG. Please set it to a YAML config file path."
+        )
 
-    return out
+    return load_router_app_config(path)
+
+
+async def _merge_models(backends: list[OpenAIBackend]) -> tuple[int, dict[str, Any]]:
+    """
+    Query /models from all backends and merge.
+
+    If at least one backend succeeds, returns 200 and a union of model entries by `id`.
+    Otherwise returns 502.
+    """
+
+    results = await asyncio.gather(
+        *[b.list_models() for b in backends], return_exceptions=True
+    )
+
+    merged: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    any_ok = False
+
+    for item in results:
+        if isinstance(item, Exception):
+            continue
+        status, payload = item
+        if not (200 <= status < 300):
+            continue
+        any_ok = True
+
+        data = payload.get("data") if isinstance(payload, dict) else None
+        if isinstance(data, list):
+            for m in data:
+                if not isinstance(m, dict):
+                    continue
+                mid = str(m.get("id") or "")
+                if not mid or mid in seen:
+                    continue
+                seen.add(mid)
+                merged.append(m)
+
+    if any_ok:
+        return 200, {"object": "list", "data": merged}
+
+    return 502, {"error": {"message": "All backends failed /models"}}
 
 
 def create_app() -> FastAPI:
-    cfg = _load_config()
+    cfg = _load_cfg_from_env()
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -126,15 +124,25 @@ def create_app() -> FastAPI:
         # Router-side load tracker (inflight + RPS).
         app.state.load_tracker = AsyncLoadTracker(window_s=1.0)
 
-        # Backend client.
-        app.state.backend = HttpOpenAIBackend(
-            backend_id=cfg.backend_id,
-            base_url_v1=cfg.backend_base_url_v1,
-        )
+        # Backends registry (ordered list for round-robin).
+        app.state.backends = [
+            HttpOpenAIBackend(
+                backend_id=b.backend_id,
+                base_url_v1=b.base_url_v1,
+                api_key=b.api_key,
+            )
+            for b in cfg.backends
+        ]
+        if not app.state.backends:
+            raise RuntimeError("No backends configured")
+
+        # Round-robin state.
+        app.state.rr_lock = asyncio.Lock()
+        app.state.rr_index = 0
 
         # JSONL logger
         app.state.logger = AsyncJsonlLogger(
-            cfg.log_path, append=cfg.log_append, flush_every=1
+            cfg.router.log_path, append=cfg.router.log_append, flush_every=1
         )
         await app.state.logger.__aenter__()
 
@@ -142,19 +150,38 @@ def create_app() -> FastAPI:
 
         # Shutdown
         await app.state.logger.close()
-        await app.state.backend.close()
+        for b in app.state.backends:
+            await b.close()
 
-    app = FastAPI(title="IMMAS Router", version="0.2", lifespan=lifespan)
+    app = FastAPI(title="IMMAS Router", version="0.3", lifespan=lifespan)
+
+    async def _select_backend(req: Request) -> HttpOpenAIBackend:
+        """
+        Select one backend for this request.
+
+        Current policy: round-robin over configured backends.
+        """
+
+        backends: list[HttpOpenAIBackend] = req.app.state.backends
+        rr_lock: asyncio.Lock = req.app.state.rr_lock
+
+        async with rr_lock:
+            idx: int = int(req.app.state.rr_index)
+            req.app.state.rr_index = (idx + 1) % len(backends)
+
+        return backends[idx]
 
     @app.get("/v1/models")
     async def list_models(req: Request) -> JSONResponse:
-        backend: OpenAIBackend = req.app.state.backend
-        status, payload = await backend.list_models()
+        backends: list[OpenAIBackend] = req.app.state.backends
+        status, payload = await _merge_models(backends)
+
         return JSONResponse(status_code=status, content=payload)
 
     @app.post("/v1/chat/completions", response_model=None)
     async def chat_completions(req: Request) -> JSONResponse:
-        backend: OpenAIBackend = req.app.state.backend
+        backend = await _select_backend(req)
+
         predictor: AgentPredictor = req.app.state.predictor
         predictor_lock: asyncio.Lock = req.app.state.predictor_lock
         cache: TextPrefixCache = req.app.state.prefix_cache
@@ -181,7 +208,7 @@ def create_app() -> FastAPI:
         prompt_repr = serialize_chat_messages(messages)
         prompt_chars = len(prompt_repr)
 
-        # Compute kvmatch against router cache
+        # KV-match proxy against router-side cache *for the chosen backend*.
         async with cache_lock:
             pm = cache.match(
                 backend_id=backend.backend_id,
@@ -195,6 +222,7 @@ def create_app() -> FastAPI:
 
         async with load_tracker.track() as load:
             inp = PredictorInput(
+                backend_id=backend.backend_id,
                 model=model,
                 source=source,
                 dialogue_id=dialogue_id,
@@ -214,15 +242,13 @@ def create_app() -> FastAPI:
             pred_perf_prob = float(pred["performance"][0])
             pred_cache_ratio = float(pred["cache_ratio"][0])
 
-            backend_headers = _backend_passthrough_headers(req)
-            backend_headers.update(
-                {
-                    "X-IMMAS-RUN-ID": run_id,
-                    "X-IMMAS-DIALOGUE-ID": dialogue_id,
-                    "X-IMMAS-TURN-NUMBER": str(turn_number),
-                    "X-IMMAS-SOURCE": source,
-                }
-            )
+            # Router-controlled headers to backend (no client auth passthrough).
+            backend_headers = {
+                "X-IMMAS-RUN-ID": run_id,
+                "X-IMMAS-DIALOGUE-ID": dialogue_id,
+                "X-IMMAS-TURN-NUMBER": str(turn_number),
+                "X-IMMAS-SOURCE": source,
+            }
 
             # Forward to backend + observe
             t0 = time.perf_counter()

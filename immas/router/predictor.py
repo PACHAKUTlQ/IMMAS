@@ -7,6 +7,10 @@ Important:
 - We never use observed cached_tokens as a prediction-time feature.
 - We *do* train a cache-ratio model using observed cached_tokens as labels.
 - Latency/cost models receive the *predicted* cache ratio as an input feature.
+
+Multi-backend
+------------
+We model backend differences by including `backend_id` as a categorical feature.
 """
 
 from __future__ import annotations
@@ -24,6 +28,8 @@ MetricPred = Tuple[float, float]
 @dataclass(frozen=True, slots=True)
 class PredictorInput:
     """Inputs known at routing time."""
+
+    backend_id: str
 
     model: str
     source: str
@@ -73,6 +79,7 @@ class AgentPredictor:
     def _base_features(self, inp: PredictorInput) -> Features:
         return {
             "bias": 1.0,
+            "backend_id": inp.backend_id,
             "model": inp.model,
             "source": inp.source,
             "turn_number": float(inp.turn_number),
@@ -85,12 +92,8 @@ class AgentPredictor:
     def _predict_cache_ratio(self, x_base: Features) -> float:
         v = self.model_cache_ratio.predict_one(x_base)
         r = float(v) if v is not None else 0.0
-        return max(0.0, min(1.0, r))
 
-    def _full_features(self, inp: PredictorInput) -> Features:
-        x_base = self._base_features(inp)
-        pred_cache_ratio = self._predict_cache_ratio(x_base)
-        return {**x_base, "pred_cache_ratio": float(pred_cache_ratio)}
+        return max(0.0, min(1.0, r))
 
     def predict(self, inp: PredictorInput) -> Dict[str, MetricPred]:
         x_base = self._base_features(inp)
@@ -108,6 +111,7 @@ class AgentPredictor:
         perf_f = max(0.0, min(1.0, perf_f))
 
         dummy_std = 0.0
+
         return {
             "latency_ms": (lat_f, dummy_std),
             "cost_tokens": (cost_f, dummy_std),
