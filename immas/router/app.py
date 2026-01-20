@@ -25,7 +25,7 @@ from fastapi.responses import JSONResponse
 from immas.common.load import AsyncLoadTracker
 from immas.openai.chat import extract_first_assistant_message, serialize_chat_messages
 from immas.openai.usage import parse_usage
-from immas.router.backend import HttpOpenAIBackend, OpenAIBackend
+from immas.router.backend import HttpOpenAIBackend
 from immas.router.config import RouterAppConfig, load_router_app_config
 from immas.router.logger import AsyncJsonlLogger, RouterLogRecord
 from immas.router.predictor import AgentPredictor, PredictorInput
@@ -67,47 +67,6 @@ def _load_cfg_from_env() -> RouterAppConfig:
     return load_router_app_config(path)
 
 
-async def _merge_models(backends: list[OpenAIBackend]) -> tuple[int, dict[str, Any]]:
-    """
-    Query /models from all backends and merge.
-
-    If at least one backend succeeds, returns 200 and a union of model entries by `id`.
-    Otherwise returns 502.
-    """
-
-    results = await asyncio.gather(
-        *[b.list_models() for b in backends], return_exceptions=True
-    )
-
-    merged: list[dict[str, Any]] = []
-    seen: set[str] = set()
-    any_ok = False
-
-    for item in results:
-        if isinstance(item, BaseException):
-            continue
-        status, payload = item
-        if not (200 <= status < 300):
-            continue
-        any_ok = True
-
-        data = payload.get("data") if isinstance(payload, dict) else None
-        if isinstance(data, list):
-            for m in data:
-                if not isinstance(m, dict):
-                    continue
-                mid = str(m.get("id") or "")
-                if not mid or mid in seen:
-                    continue
-                seen.add(mid)
-                merged.append(m)
-
-    if any_ok:
-        return 200, {"object": "list", "data": merged}
-
-    return 502, {"error": {"message": "All backends failed /models"}}
-
-
 def create_app() -> FastAPI:
     cfg = _load_cfg_from_env()
 
@@ -133,8 +92,7 @@ def create_app() -> FastAPI:
             )
             for b in cfg.backends
         ]
-        if not app.state.backends:
-            raise RuntimeError("No backends configured")
+        app.state.backend_model_by_id = {b.backend_id: b.model for b in cfg.backends}
 
         # Round-robin state.
         app.state.rr_lock = asyncio.Lock()
@@ -153,7 +111,7 @@ def create_app() -> FastAPI:
         for b in app.state.backends:
             await b.close()
 
-    app = FastAPI(title="IMMAS Router", version="0.3", lifespan=lifespan)
+    app = FastAPI(title="IMMAS Router", version="0.4", lifespan=lifespan)
 
     async def _select_backend(req: Request) -> HttpOpenAIBackend:
         """
@@ -173,14 +131,28 @@ def create_app() -> FastAPI:
 
     @app.get("/v1/models")
     async def list_models(req: Request) -> JSONResponse:
-        backends: list[OpenAIBackend] = req.app.state.backends
-        status, payload = await _merge_models(backends)
+        """
+        Return the union of router-configured backend model names.
 
-        return JSONResponse(status_code=status, content=payload)
+        Rationale: in this system, the router is the "source of truth" for models
+        because backends may expose different model names and the client should
+        not choose backend models directly.
+        """
+        backend_model_by_id: dict[str, str] = req.app.state.backend_model_by_id
+        seen: set[str] = set()
+        data: list[dict[str, Any]] = []
+        for m in backend_model_by_id.values():
+            if m in seen:
+                continue
+            seen.add(m)
+            data.append({"id": m, "object": "model"})
+        return JSONResponse(status_code=200, content={"object": "list", "data": data})
 
     @app.post("/v1/chat/completions", response_model=None)
     async def chat_completions(req: Request) -> JSONResponse:
         backend = await _select_backend(req)
+        backend_model_by_id: dict[str, str] = req.app.state.backend_model_by_id
+        backend_model = backend_model_by_id.get(backend.backend_id, "")
 
         predictor: AgentPredictor = req.app.state.predictor
         predictor_lock: asyncio.Lock = req.app.state.predictor_lock
@@ -200,11 +172,21 @@ def create_app() -> FastAPI:
                 status_code=400, content={"error": {"message": "Invalid JSON body"}}
             )
 
-        # OpenAI schema: body["model"], body["messages"] are expected.
-        model = str(body.get("model") or "")
-        messages = body.get("messages")
+        # Client-provided model is ignored; router enforces backend-specific model.
+        if not backend_model:
+            return JSONResponse(
+                status_code=500,
+                content={
+                    "error": {
+                        "message": f"No configured model for backend {backend.backend_id}"
+                    }
+                },
+            )
 
-        # Serialize *full* conversation deterministically so that turn t is a prefix of turn t+1
+        # Use *effective* model for feature computation / caching / logging.
+        effective_model = backend_model
+
+        messages = body.get("messages")
         prompt_repr = serialize_chat_messages(messages)
         prompt_chars = len(prompt_repr)
 
@@ -212,7 +194,7 @@ def create_app() -> FastAPI:
         async with cache_lock:
             pm = cache.match(
                 backend_id=backend.backend_id,
-                model=model,
+                model=effective_model,
                 dialogue_id=dialogue_id,
                 prompt_text=prompt_repr,
             )
@@ -223,7 +205,7 @@ def create_app() -> FastAPI:
         async with load_tracker.track() as load:
             inp = PredictorInput(
                 backend_id=backend.backend_id,
-                model=model,
+                model=effective_model,
                 source=source,
                 dialogue_id=dialogue_id,
                 turn_number=turn_number,
@@ -250,10 +232,13 @@ def create_app() -> FastAPI:
                 "X-IMMAS-SOURCE": source,
             }
 
-            # Forward to backend + observe
+            # Forward a copy with router-enforced model.
+            forwarded_body: dict[str, Any] = dict(body)
+            forwarded_body["model"] = effective_model
+
             t0 = time.perf_counter()
             status, resp_json = await backend.forward_chat_completions(
-                body,
+                forwarded_body,
                 headers=backend_headers,
             )
             t1 = time.perf_counter()
@@ -294,7 +279,7 @@ def create_app() -> FastAPI:
                 async with cache_lock:
                     cache.update(
                         backend_id=backend.backend_id,
-                        model=model,
+                        model=effective_model,
                         dialogue_id=dialogue_id,
                         cached_text=new_prompt_repr,
                     )
@@ -307,7 +292,7 @@ def create_app() -> FastAPI:
             t_end_monotonic=float(t1),
             backend_id=backend.backend_id,
             backend_base_url_v1=backend.base_url_v1,
-            model=model,
+            model=effective_model,
             source=source,
             dialogue_id=dialogue_id,
             turn_number=int(turn_number),

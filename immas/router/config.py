@@ -1,15 +1,3 @@
-"""
-immas.router.config
-
-YAML configuration loader for the router.
-
-Design goals
-------------
-- Production-friendly: explicit validation, strict typing, clear errors.
-- Supports multiple backends, each with its own OpenAI-compatible base URL and API key.
-- Router does not authenticate clients; it uses backend API keys from this config.
-"""
-
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -29,6 +17,7 @@ class BackendConfig:
     backend_id: str
     base_url_v1: str
     api_key: str
+    model: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -51,12 +40,14 @@ class RouterAppConfig:
 def _as_mapping(x: Any, *, ctx: str) -> Mapping[str, Any]:
     if not isinstance(x, Mapping):
         raise TypeError(f"Expected mapping at {ctx}, got {type(x)!r}")
+
     return cast(Mapping[str, Any], x)
 
 
 def _as_list(x: Any, *, ctx: str) -> list[Any]:
     if not isinstance(x, list):
         raise TypeError(f"Expected list at {ctx}, got {type(x)!r}")
+
     return x
 
 
@@ -65,26 +56,18 @@ def _as_str(x: Any, *, ctx: str) -> str:
         return ""
     if not isinstance(x, str):
         raise TypeError(f"Expected string at {ctx}, got {type(x)!r}")
+
     return x.strip()
 
 
 def _as_bool(x: Any, *, ctx: str) -> bool:
     if isinstance(x, bool):
         return x
+
     raise TypeError(f"Expected bool at {ctx}, got {type(x)!r}")
 
 
 def load_router_app_config(path: str) -> RouterAppConfig:
-    """
-    Load router YAML configuration from `path`.
-
-    Raises
-    ------
-    FileNotFoundError
-        If config file does not exist.
-    ValueError / TypeError
-        If config schema is invalid.
-    """
     p = Path(path)
     if not p.exists():
         raise FileNotFoundError(f"Router config not found: {p}")
@@ -115,6 +98,7 @@ def load_router_app_config(path: str) -> RouterAppConfig:
         backend_id = _as_str(bm.get("id"), ctx=f"backends[{i}].id")
         base_url_v1 = _as_str(bm.get("base_url_v1"), ctx=f"backends[{i}].base_url_v1")
         api_key = _as_str(bm.get("api_key", ""), ctx=f"backends[{i}].api_key")
+        model = _as_str(bm.get("model"), ctx=f"backends[{i}].model")
 
         if not backend_id:
             raise ValueError(f"Missing/empty backends[{i}].id")
@@ -126,11 +110,15 @@ def load_router_app_config(path: str) -> RouterAppConfig:
             raise ValueError(f"Missing/empty backends[{i}].base_url_v1")
         base_url_v1 = base_url_v1.rstrip("/")
 
+        if not model:
+            raise ValueError(f"Missing/empty backends[{i}].model")
+
         backends.append(
             BackendConfig(
                 backend_id=backend_id,
                 base_url_v1=base_url_v1,
                 api_key=api_key,
+                model=model,
             )
         )
 
