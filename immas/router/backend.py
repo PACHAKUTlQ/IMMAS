@@ -8,7 +8,7 @@ Uses a simple HTTP JSON forwarder.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, Protocol, Tuple
+from typing import Any, Dict, Mapping, Protocol, Tuple
 
 import httpx
 
@@ -18,13 +18,19 @@ class OpenAIBackend(Protocol):
 
     @property
     def backend_id(self) -> str: ...
+
     @property
     def base_url_v1(self) -> str: ...
 
     async def list_models(self) -> Tuple[int, Dict[str, Any]]: ...
+
     async def forward_chat_completions(
-        self, body: Dict[str, Any]
+        self,
+        body: Dict[str, Any],
+        *,
+        headers: Mapping[str, str] | None = None,
     ) -> Tuple[int, Dict[str, Any]]: ...
+
     async def close(self) -> None: ...
 
 
@@ -56,10 +62,15 @@ class HttpOpenAIBackend:
         return r.status_code, payload
 
     async def forward_chat_completions(
-        self, body: Dict[str, Any]
+        self,
+        body: Dict[str, Any],
+        *,
+        headers: Mapping[str, str] | None = None,
     ) -> Tuple[int, Dict[str, Any]]:
         url = f"{self.base_url_v1}/chat/completions"
-        r = await self._http.post(url, json=body, timeout=None)
+        r = await self._http.post(
+            url, json=body, headers=dict(headers or {}), timeout=None
+        )
         try:
             payload = dict(r.json())
         except Exception:

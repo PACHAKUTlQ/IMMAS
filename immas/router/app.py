@@ -19,15 +19,17 @@ from __future__ import annotations
 import asyncio
 import os
 import time
+
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from typing import Optional
+from typing import Any, Optional
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
 from immas.common.load import AsyncLoadTracker
-from immas.common.text import extract_last_user_text, inline_for_cache
+from immas.openai.chat import extract_first_assistant_message, serialize_chat_messages
+from immas.openai.usage import parse_usage
 from immas.router.backend import HttpOpenAIBackend, OpenAIBackend
 from immas.router.logger import AsyncJsonlLogger, RouterLogRecord
 from immas.router.predictor import AgentPredictor, PredictorInput
@@ -38,6 +40,9 @@ _HEADER_RUN_ID = "x-immas-run-id"
 _HEADER_DIALOGUE_ID = "x-immas-dialogue-id"
 _HEADER_TURN_NUMBER = "x-immas-turn-number"
 _HEADER_SOURCE = "x-immas-source"
+_PASSTHROUGH_HEADERS = (
+    "authorization",  # Bearer <API_KEY>
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -60,7 +65,7 @@ def _env_bool(name: str, default: bool) -> bool:
 
 def _load_config() -> RouterConfig:
     """
-    Phase 0: single backend configured by env.
+    Single backend configured by env.
     Later: extend to multiple backends.
     """
     backend_base_url_v1 = os.environ.get(
@@ -79,9 +84,8 @@ def _load_config() -> RouterConfig:
     )
 
 
-def _get_required_header(req: Request, name: str) -> str:
-    v = req.headers.get(name)
-    return (v or "").strip()
+def _get_header(req: Request, name: str) -> str:
+    return (req.headers.get(name) or "").strip()
 
 
 def _parse_turn_number(raw: str) -> int:
@@ -90,6 +94,20 @@ def _parse_turn_number(raw: str) -> int:
         return n if n >= 0 else 0
     except Exception:
         return 0
+
+
+def _backend_passthrough_headers(req: Request) -> dict[str, str]:
+    """
+    Extract a safe subset of inbound headers (e.g. Authorization) that should be forwarded to the backend.
+    """
+
+    out: dict[str, str] = {}
+    for h in _PASSTHROUGH_HEADERS:
+        v = req.headers.get(h)
+        if v:
+            out[h] = v
+
+    return out
 
 
 def create_app() -> FastAPI:
@@ -126,7 +144,7 @@ def create_app() -> FastAPI:
         await app.state.logger.close()
         await app.state.backend.close()
 
-    app = FastAPI(title="IMMAS Router", version="0.1", lifespan=lifespan)
+    app = FastAPI(title="IMMAS Router", version="0.2", lifespan=lifespan)
 
     @app.get("/v1/models")
     async def list_models(req: Request) -> JSONResponse:
@@ -144,30 +162,36 @@ def create_app() -> FastAPI:
         load_tracker: AsyncLoadTracker = req.app.state.load_tracker
         logger: AsyncJsonlLogger = req.app.state.logger
 
-        run_id = _get_required_header(req, _HEADER_RUN_ID) or "run_unknown"
-        dialogue_id = (
-            _get_required_header(req, _HEADER_DIALOGUE_ID) or "dialogue_unknown"
-        )
-        turn_number = _parse_turn_number(_get_required_header(req, _HEADER_TURN_NUMBER))
-        source = _get_required_header(req, _HEADER_SOURCE) or "unknown"
+        run_id = _get_header(req, _HEADER_RUN_ID) or "run_unknown"
+        dialogue_id = _get_header(req, _HEADER_DIALOGUE_ID) or "dialogue_unknown"
+        turn_number = _parse_turn_number(_get_header(req, _HEADER_TURN_NUMBER))
+        source = _get_header(req, _HEADER_SOURCE) or "unknown"
 
-        body = await req.json()
+        body: Any = await req.json()
+        if not isinstance(body, dict):
+            return JSONResponse(
+                status_code=400, content={"error": {"message": "Invalid JSON body"}}
+            )
 
         # OpenAI schema: body["model"], body["messages"] are expected.
         model = str(body.get("model") or "")
         messages = body.get("messages")
 
-        prompt_text = extract_last_user_text(messages)
-        prompt_chars = len(prompt_text)
+        # Serialize *full* conversation deterministically so that turn t is a prefix of turn t+1
+        prompt_repr = serialize_chat_messages(messages)
+        prompt_chars = len(prompt_repr)
 
         # Compute kvmatch against router cache
         async with cache_lock:
-            kvmatch = cache.match_ratio(
+            pm = cache.match(
                 backend_id=backend.backend_id,
                 model=model,
                 dialogue_id=dialogue_id,
-                prompt_text=prompt_text,
+                prompt_text=prompt_repr,
             )
+        kvmatch_text = float(pm.ratio)
+        cached_prompt_chars = int(pm.cached_chars)
+        kvmatch_lcp_chars = int(pm.lcp_chars)
 
         async with load_tracker.track() as load:
             inp = PredictorInput(
@@ -175,8 +199,8 @@ def create_app() -> FastAPI:
                 source=source,
                 dialogue_id=dialogue_id,
                 turn_number=turn_number,
-                prompt_text=prompt_text,
-                kvmatch=float(kvmatch),
+                prompt_repr=prompt_repr,
+                kvmatch_text=float(kvmatch_text),
                 router_inflight=int(load.inflight_requests),
                 router_rps_1s=float(load.rps),
             )
@@ -188,44 +212,44 @@ def create_app() -> FastAPI:
             pred_latency_ms = float(pred["latency_ms"][0])
             pred_cost_tokens = float(pred["cost_tokens"][0])
             pred_perf_prob = float(pred["performance"][0])
+            pred_cache_ratio = float(pred["cache_ratio"][0])
+
+            backend_headers = _backend_passthrough_headers(req)
+            backend_headers.update(
+                {
+                    "X-IMMAS-RUN-ID": run_id,
+                    "X-IMMAS-DIALOGUE-ID": dialogue_id,
+                    "X-IMMAS-TURN-NUMBER": str(turn_number),
+                    "X-IMMAS-SOURCE": source,
+                }
+            )
 
             # Forward to backend + observe
             t0 = time.perf_counter()
-            status, resp_json = await backend.forward_chat_completions(body)
+            status, resp_json = await backend.forward_chat_completions(
+                body,
+                headers=backend_headers,
+            )
             t1 = time.perf_counter()
 
         obs_latency_ms = (t1 - t0) * 1000.0
 
-        # Extract observed tokens + assistant answer (best-effort).
-        completion_id = str(resp_json.get("id") or "")
-        usage = resp_json.get("usage") if isinstance(resp_json, dict) else None
-        obs_total_tokens = 0
-        if isinstance(usage, dict):
-            try:
-                obs_total_tokens = int(usage.get("total_tokens") or 0)
-            except Exception:
-                obs_total_tokens = 0
+        completion_id = (
+            str(resp_json.get("id") or "") if isinstance(resp_json, dict) else ""
+        )
 
-        answer_text = ""
-        try:
-            if isinstance(resp_json, dict):
-                choices = resp_json.get("choices")
-                if isinstance(choices, list) and choices:
-                    msg = (
-                        choices[0].get("message")
-                        if isinstance(choices[0], dict)
-                        else None
-                    )
-                    if isinstance(msg, dict):
-                        answer_text = str(msg.get("content") or "")
-        except Exception:
-            answer_text = ""
+        usage = parse_usage(resp_json if isinstance(resp_json, dict) else {})
+        obs_prompt_tokens = usage.prompt_tokens
+        obs_completion_tokens = usage.completion_tokens
+        obs_total_tokens = usage.total_tokens
+        obs_cached_tokens = usage.cached_tokens
+        obs_cache_ratio = usage.cache_ratio
 
-        # FIXME: Placeholder correctness: always True.
+        # Placeholder correctness
         correct = True
-
-        # Online update.
         error: Optional[str] = None
+
+        # Update predictor + cache only on success
         if 200 <= status < 300:
             async with predictor_lock:
                 predictor.update(
@@ -233,17 +257,20 @@ def create_app() -> FastAPI:
                     real_latency_ms=float(obs_latency_ms),
                     real_cost_tokens=int(obs_total_tokens),
                     real_perf_correct=bool(correct),
+                    real_cache_ratio=float(obs_cache_ratio),
                 )
 
-            # Update router cache so next turn gets a higher prefix match.
-            # We mimic the client's prompt evolution: next prompt contains prompt + " " + inline(answer).
-            if prompt_text:
+            # Update router prefix cache using the request messages + returned assistant message
+            assistant = extract_first_assistant_message(resp_json)
+            if assistant is not None and isinstance(messages, list):
+                new_messages = list(messages) + [assistant.to_openai_message()]
+                new_prompt_repr = serialize_chat_messages(new_messages)
                 async with cache_lock:
                     cache.update(
                         backend_id=backend.backend_id,
                         model=model,
                         dialogue_id=dialogue_id,
-                        cached_text=prompt_text + " " + inline_for_cache(answer_text),
+                        cached_text=new_prompt_repr,
                     )
         else:
             error = f"backend_status={status}"
@@ -259,15 +286,22 @@ def create_app() -> FastAPI:
             dialogue_id=dialogue_id,
             turn_number=int(turn_number),
             prompt_chars=int(prompt_chars),
-            kvmatch=float(kvmatch),
+            cached_prompt_chars=int(cached_prompt_chars),
+            kvmatch_lcp_chars=int(kvmatch_lcp_chars),
+            kvmatch_text=float(kvmatch_text),
             router_inflight=int(inp.router_inflight),
             router_rps_1s=float(inp.router_rps_1s),
             pred_latency_ms=float(pred_latency_ms),
             pred_cost_tokens=float(pred_cost_tokens),
             pred_perf_prob=float(pred_perf_prob),
+            pred_cache_ratio=float(pred_cache_ratio),
             completion_id=completion_id,
             obs_latency_ms=float(obs_latency_ms),
+            obs_prompt_tokens=int(obs_prompt_tokens),
+            obs_completion_tokens=int(obs_completion_tokens),
             obs_total_tokens=int(obs_total_tokens),
+            obs_cached_tokens=int(obs_cached_tokens),
+            obs_cache_ratio=float(obs_cache_ratio),
             correct=bool(correct),
             error=error,
         )
