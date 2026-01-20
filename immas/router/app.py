@@ -84,7 +84,7 @@ async def _merge_models(backends: list[OpenAIBackend]) -> tuple[int, dict[str, A
     any_ok = False
 
     for item in results:
-        if isinstance(item, Exception):
+        if isinstance(item, BaseException):
             continue
         status, payload = item
         if not (200 <= status < 300):
