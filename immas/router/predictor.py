@@ -31,13 +31,13 @@ from __future__ import annotations
 import asyncio
 
 from dataclasses import dataclass
-from typing import Any, Dict, Iterable, Mapping, Tuple
+from typing import Any, Dict, Iterable, Mapping
 
 from river import compose, preprocessing, tree
 
 
 Features = Dict[str, Any]
-MetricPred = Tuple[float, float]
+MetricPred = tuple[float, float]
 Predictions = Dict[str, MetricPred]
 
 
@@ -190,14 +190,14 @@ class AsyncBackendPredictorPool:
             seen.add(b)
             uniq.append(b)
 
-        self._backend_ids: Tuple[str, ...] = tuple(uniq)
+        self._backend_ids: tuple[str, ...] = tuple(uniq)
         self._predictors: dict[str, AgentPredictor] = {
             b: AgentPredictor() for b in uniq
         }
         self._locks: dict[str, asyncio.Lock] = {b: asyncio.Lock() for b in uniq}
 
     @property
-    def backend_ids(self) -> Tuple[str, ...]:
+    def backend_ids(self) -> tuple[str, ...]:
         """Backend IDs managed by this pool (stable order)."""
 
         return self._backend_ids
