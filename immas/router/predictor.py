@@ -244,8 +244,14 @@ class AsyncBackendPredictorPool:
             _predict_under_lock(backend_id, inp)
             for backend_id, inp in inputs_by_backend.items()
         ]
-        results = await asyncio.gather(*tasks)
-        return {backend_id: preds for backend_id, preds in results}
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        out: Dict[str, Predictions] = {}
+        for r in results:
+            if isinstance(r, BaseException):
+                continue
+            backend_id, preds = r
+            out[backend_id] = preds
+        return out
 
     async def update_one(
         self,
