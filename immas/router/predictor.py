@@ -220,7 +220,7 @@ class AsyncBackendPredictorPool:
         self, inputs_by_backend: Mapping[str, PredictorInput]
     ) -> Dict[str, Predictions]:
         """
-        Predict metrics for all provided backends.
+        Predict metrics for all provided backends concurrently.
 
         Parameters
         ----------
@@ -233,16 +233,19 @@ class AsyncBackendPredictorPool:
             Mapping from backend_id -> Predictions.
         """
 
-        out: Dict[str, Predictions] = {}
-
-        # Acquire one backend lock at a time to avoid lock ordering issues.
-        # (No nested lock acquisition.)
-        for backend_id, inp in inputs_by_backend.items():
+        async def _predict_under_lock(
+            backend_id: str, inp: PredictorInput
+        ) -> tuple[str, Predictions]:
             pred, lock = self._get(backend_id)
             async with lock:
-                out[backend_id] = pred.predict(inp)
+                return backend_id, pred.predict(inp)
 
-        return out
+        tasks = [
+            _predict_under_lock(backend_id, inp)
+            for backend_id, inp in inputs_by_backend.items()
+        ]
+        results = await asyncio.gather(*tasks)
+        return {backend_id: preds for backend_id, preds in results}
 
     async def update_one(
         self,
