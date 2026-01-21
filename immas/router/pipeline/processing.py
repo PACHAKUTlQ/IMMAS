@@ -116,12 +116,12 @@ async def _process_one_chat_completion(
         forwarded_body["model"] = effective_model
 
         async with state.load_tracker.track() as load:
-            t0 = time.perf_counter()
+            t0 = time.monotonic()
             status, resp_json = await backend.forward_chat_completions(
                 forwarded_body,
                 headers=backend_headers,
             )
-            t1 = time.perf_counter()
+            t1 = time.monotonic()
 
             # Note: load fields are sampled during the tracked section.
             # The logged RouterLogRecord fields currently represent decision-time

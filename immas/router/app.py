@@ -99,7 +99,7 @@ def create_app() -> FastAPI:
             turn_number=int(turn_number),
             source=source,
             body=dict(body),
-            t_enqueued_monotonic=float(time.perf_counter()),
+            t_enqueued_monotonic=float(time.monotonic()),
             future=fut,
         )
 

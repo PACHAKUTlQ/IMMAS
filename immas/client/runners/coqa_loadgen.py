@@ -76,7 +76,7 @@ async def run_dialogue(
         messages.append({"role": "user", "content": f"Q{turn_number}: {question}"})
 
         async with send_sem:
-            t0 = time.perf_counter()
+            t0 = time.monotonic()
             try:
                 resp = await openai_client.chat.completions.create(
                     model=model_name,
@@ -103,10 +103,11 @@ async def run_dialogue(
                         )
                 return
 
-            t1 = time.perf_counter()
+            t1 = time.monotonic()
 
         obs_latency_ms = (t1 - t0) * 1000.0
-        answer = resp.choices[0].message.content or ""  # IMPORTANT: no .strip()
+        # IMPORTANT: no .strip()
+        answer = resp.choices[0].message.content or ""
         usage = getattr(resp, "usage", None)
         obs_total_tokens = int(getattr(usage, "total_tokens", 0) or 0)
 
@@ -182,7 +183,9 @@ async def main_async() -> None:
     print_lock = asyncio.Lock()
 
     print(
-        f"Loadgen split={split} dialogues={len(dialogues)} turns<={max_turns_per_dialogue} "
+        f"Loadgen split={split} dialogues={len(dialogues)} turns<={
+            max_turns_per_dialogue
+        } "
         f"MAX_CONCURRENCY={max_concurrency} run_id={run_id}"
     )
     print(f"Router base_url={openai_base_url_v1}")

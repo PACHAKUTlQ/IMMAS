@@ -187,11 +187,11 @@ class MicroBatcher(Generic[T]):
                     break
 
                 batch: list[T] = [first]
-                t_start = time.perf_counter()
+                t_start = time.monotonic()
                 deadline = t_start + self._max_wait_s
 
                 while len(batch) < self._max_batch_size:
-                    remaining = deadline - time.perf_counter()
+                    remaining = deadline - time.monotonic()
                     if remaining <= 0:
                         break
                     try:
