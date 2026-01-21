@@ -52,122 +52,82 @@ def _task_done_callback_factory(
     return _cb
 
 
+def _find_chosen_backend_score(
+    backend_scores: list[RouterBackendScore], *, backend_id: str
+) -> RouterBackendScore | None:
+    for s in backend_scores:
+        if s.backend_id == backend_id:
+            return s
+    return None
+
+
 async def _process_one_chat_completion(
     prep: PreparedChatCompletion, *, state: RouterState
 ) -> None:
     """
     Process exactly one chat completion request and resolve its Future.
 
-    This contains the same core logic as the old inline endpoint:
-    - compute per-backend prefix match proxy (using cached router texts)
-    - predict per-backend metrics
-    - route (currently: pre-assigned round-robin)
-    - forward to backend
-    - update predictor and router prefix cache on success
-    - log RouterLogRecord
+    Batch-level scoring is already done in `handle_chat_batch()` and passed in via
+    PreparedChatCompletion. This function focuses on:
+    - forwarding to backend
+    - measuring observations
+    - updating predictor and router prefix cache on success
+    - logging
     """
 
     pending = prep.pending
+    backend = prep.assigned_backend
+    effective_model = prep.effective_model
+
+    chosen_score = _find_chosen_backend_score(
+        prep.backend_scores, backend_id=backend.backend_id
+    )
+    if chosen_score is None:
+        try_set_future_result(
+            pending.future,
+            (
+                500,
+                {"error": {"message": "Internal router error: missing chosen score"}},
+            ),
+        )
+        return
+
+    kvmatch_text = float(chosen_score.kvmatch_text)
+    cached_prompt_chars = int(chosen_score.cached_prompt_chars)
+    kvmatch_lcp_chars = int(chosen_score.kvmatch_lcp_chars)
+
+    pred_latency_ms = float(chosen_score.pred_latency_ms)
+    pred_cost_tokens = float(chosen_score.pred_cost_tokens)
+    pred_perf_prob = float(chosen_score.pred_perf_prob)
+    pred_cache_ratio = float(chosen_score.pred_cache_ratio)
 
     try:
         messages = pending.body.get("messages")
-        prompt_repr = serialize_chat_messages(messages)
-        prompt_chars = len(prompt_repr)
+        prompt_chars = int(prep.prompt_chars)
 
-        pm_by_backend: dict[str, PrefixMatch] = {}
-        for b in state.backends:
-            backend_model = state.backend_model_by_id.get(b.backend_id, "")
-            if not backend_model:
-                try_set_future_result(
-                    pending.future,
-                    (
-                        500,
-                        {
-                            "error": {
-                                "message": f"No configured model for backend {b.backend_id}"
-                            }
-                        },
-                    ),
-                )
-                return
+        backend_headers = {
+            "X-IMMAS-RUN-ID": pending.run_id,
+            "X-IMMAS-DIALOGUE-ID": pending.dialogue_id,
+            "X-IMMAS-TURN-NUMBER": str(pending.turn_number),
+            "X-IMMAS-SOURCE": pending.source,
+        }
 
-            cached_text = prep.cached_text_by_backend.get(b.backend_id)
-            pm_by_backend[b.backend_id] = match_prefix(
-                prompt_text=prompt_repr,
-                cached_text=cached_text,
-            )
-
-        backend = prep.assigned_backend
-        backend_model = state.backend_model_by_id.get(backend.backend_id, "")
-        if not backend_model:
-            try_set_future_result(
-                pending.future,
-                (
-                    500,
-                    {
-                        "error": {
-                            "message": f"No configured model for backend {backend.backend_id}"
-                        }
-                    },
-                ),
-            )
-            return
-
-        effective_model = backend_model
+        forwarded_body: dict[str, Any] = dict(pending.body)
+        forwarded_body["model"] = effective_model
 
         async with state.load_tracker.track() as load:
-            inputs_by_backend: dict[str, PredictorInput] = {}
-            for b in state.backends:
-                model = state.backend_model_by_id[b.backend_id]
-                pm = pm_by_backend.get(b.backend_id)
-                if pm is None:
-                    pm = PrefixMatch(
-                        ratio=0.0, lcp_chars=0, prompt_chars=0, cached_chars=0
-                    )
-
-                inputs_by_backend[b.backend_id] = PredictorInput(
-                    backend_id=b.backend_id,
-                    model=model,
-                    source=pending.source,
-                    dialogue_id=pending.dialogue_id,
-                    turn_number=pending.turn_number,
-                    prompt_repr=prompt_repr,
-                    kvmatch_text=float(pm.ratio),
-                    router_inflight=int(load.inflight_requests),
-                    router_rps_1s=float(load.rps),
-                )
-
-            preds_by_backend = await state.predictors.predict_all(inputs_by_backend)
-
-            chosen_pred = preds_by_backend.get(backend.backend_id, {})
-            pred_latency_ms = float(chosen_pred.get("latency_ms", (0.0, 0.0))[0])
-            pred_cost_tokens = float(chosen_pred.get("cost_tokens", (0.0, 0.0))[0])
-            pred_perf_prob = float(chosen_pred.get("performance", (0.0, 0.0))[0])
-            pred_cache_ratio = float(chosen_pred.get("cache_ratio", (0.0, 0.0))[0])
-
-            chosen_pm = pm_by_backend.get(backend.backend_id) or PrefixMatch(
-                ratio=0.0, lcp_chars=0, prompt_chars=0, cached_chars=0
-            )
-            kvmatch_text = float(chosen_pm.ratio)
-            cached_prompt_chars = int(chosen_pm.cached_chars)
-            kvmatch_lcp_chars = int(chosen_pm.lcp_chars)
-
-            backend_headers = {
-                "X-IMMAS-RUN-ID": pending.run_id,
-                "X-IMMAS-DIALOGUE-ID": pending.dialogue_id,
-                "X-IMMAS-TURN-NUMBER": str(pending.turn_number),
-                "X-IMMAS-SOURCE": pending.source,
-            }
-
-            forwarded_body: dict[str, Any] = dict(pending.body)
-            forwarded_body["model"] = effective_model
-
             t0 = time.perf_counter()
             status, resp_json = await backend.forward_chat_completions(
                 forwarded_body,
                 headers=backend_headers,
             )
             t1 = time.perf_counter()
+
+            # Note: load fields are sampled during the tracked section.
+            # The logged RouterLogRecord fields currently represent decision-time
+            # features, which are computed in batch handler. We therefore do not
+            # overwrite those fields here.
+            _ = load
 
         obs_latency_ms = (t1 - t0) * 1000.0
         queue_wait_ms = max(0.0, (t0 - pending.t_enqueued_monotonic) * 1000.0)
@@ -194,15 +154,15 @@ async def _process_one_chat_completion(
         )
 
         if 200 <= status < 300:
-            chosen_inp = inputs_by_backend.get(backend.backend_id)
-            if chosen_inp is not None:
-                await state.predictors.update_one(
-                    chosen_inp,
-                    real_latency_ms=float(obs_latency_ms),
-                    real_cost_tokens=int(obs_total_tokens),
-                    real_perf_correct=bool(correct),
-                )
+            # Update predictor for the chosen backend only.
+            await state.predictors.update_one(
+                prep.chosen_predictor_input,
+                real_latency_ms=float(obs_latency_ms),
+                real_cost_tokens=int(obs_total_tokens),
+                real_perf_correct=bool(correct),
+            )
 
+            # Update/evict router prefix cache for the chosen backend only.
             if evict_prefix_cache:
                 async with state.prefix_cache_lock:
                     state.prefix_cache.evict(
@@ -225,34 +185,11 @@ async def _process_one_chat_completion(
         else:
             error = f"backend_status={status}"
 
-        backend_scores: list[RouterBackendScore] = []
-        for b in state.backends:
-            pm = pm_by_backend.get(b.backend_id) or PrefixMatch(
-                ratio=0.0, lcp_chars=0, prompt_chars=0, cached_chars=0
-            )
-
-            pred = preds_by_backend.get(b.backend_id, {})
-            backend_scores.append(
-                RouterBackendScore(
-                    backend_id=b.backend_id,
-                    model=str(state.backend_model_by_id.get(b.backend_id, "")),
-                    cached_prompt_chars=int(pm.cached_chars),
-                    kvmatch_lcp_chars=int(pm.lcp_chars),
-                    kvmatch_text=float(pm.ratio),
-                    pred_latency_ms=float(pred.get("latency_ms", (0.0, 0.0))[0]),
-                    pred_cost_tokens=float(pred.get("cost_tokens", (0.0, 0.0))[0]),
-                    pred_perf_prob=float(pred.get("performance", (0.0, 0.0))[0]),
-                    pred_cache_ratio=float(pred.get("cache_ratio", (0.0, 0.0))[0]),
-                )
-            )
-
-        chosen_inp_for_log = inputs_by_backend.get(backend.backend_id)
-        router_inflight = (
-            int(chosen_inp_for_log.router_inflight) if chosen_inp_for_log else 0
-        )
-        router_rps_1s = (
-            float(chosen_inp_for_log.router_rps_1s) if chosen_inp_for_log else 0.0
-        )
+        # Router load fields in log record should reflect routing-time features.
+        # Currently they are computed in the batch handler and embedded into the
+        # chosen_predictor_input.
+        router_inflight = int(prep.chosen_predictor_input.router_inflight)
+        router_rps_1s = float(prep.chosen_predictor_input.router_rps_1s)
 
         rec = RouterLogRecord(
             run_id=pending.run_id,
@@ -277,7 +214,7 @@ async def _process_one_chat_completion(
             pred_cost_tokens=float(pred_cost_tokens),
             pred_perf_prob=float(pred_perf_prob),
             pred_cache_ratio=float(pred_cache_ratio),
-            backend_scores=backend_scores,
+            backend_scores=list(prep.backend_scores),
             completion_id=completion_id,
             obs_latency_ms=float(obs_latency_ms),
             obs_prompt_tokens=int(obs_prompt_tokens),
@@ -313,10 +250,15 @@ async def handle_chat_batch(
     """
     Batch handler invoked by MicroBatcher.
 
-    Responsibilities:
+    Responsibilities (batch-level):
     - choose an assigned backend for each request (current: round-robin)
     - fetch router prefix cache texts for all requests/backends under one lock
+    - compute per-backend prefix match + predictor outputs for each request
     - schedule per-request processing tasks
+
+    Notes
+    -----
+    This function must remain reasonably fast because the MicroBatcher awaits it.
     """
 
     if not batch:
@@ -331,27 +273,162 @@ async def handle_chat_batch(
         )
         return
 
-    cached_by_req: list[dict[str, str | None]] = [{} for _ in batch]
+    # Serialize prompts (fail individual bad requests early).
+    prompt_repr_by_i: list[str | None] = [None] * len(batch)
+    prompt_chars_by_i: list[int] = [0] * len(batch)
+
+    for i, pending in enumerate(batch):
+        try:
+            messages = pending.body.get("messages")
+            pr = serialize_chat_messages(messages)
+        except Exception:
+            try_set_future_result(
+                pending.future,
+                (400, {"error": {"message": "Invalid chat messages"}}),
+            )
+            continue
+        prompt_repr_by_i[i] = pr
+        prompt_chars_by_i[i] = int(len(pr))
+
+    # Read cached texts under one lock: cached_text[i][backend_id] -> str|None
+    cached_text_by_req: list[dict[str, str | None]] = [{} for _ in batch]
     async with state.prefix_cache_lock:
         for i, pending in enumerate(batch):
             for b in state.backends:
                 model = state.backend_model_by_id.get(b.backend_id, "")
                 if not model:
-                    cached_by_req[i][b.backend_id] = None
+                    cached_text_by_req[i][b.backend_id] = None
                     continue
-                cached_by_req[i][b.backend_id] = state.prefix_cache.get(
+                cached_text_by_req[i][b.backend_id] = state.prefix_cache.get(
                     backend_id=b.backend_id,
                     model=model,
                     dialogue_id=pending.dialogue_id,
                 )
 
+    # For each request, compute prefix match + predictor inputs and run predictors.
+    # We keep decision-time router load features as currently available (no extra
+    # load tracking in batch handler). These are set to zeros for now.
+    router_inflight_decision = 0
+    router_rps_1s_decision = 0.0
+
+    pm_by_req: list[dict[str, PrefixMatch]] = [{} for _ in batch]
+    inputs_by_req: list[dict[str, PredictorInput]] = [{} for _ in batch]
+
+    for i, pending in enumerate(batch):
+        pr = prompt_repr_by_i[i]
+        if pr is None:
+            # Already failed above.
+            continue
+
+        for b in state.backends:
+            model = state.backend_model_by_id.get(b.backend_id, "")
+            cached_text = cached_text_by_req[i].get(b.backend_id)
+            pm = match_prefix(prompt_text=pr, cached_text=cached_text)
+            pm_by_req[i][b.backend_id] = pm
+
+            # Predictor input for this (request, backend)
+            inputs_by_req[i][b.backend_id] = PredictorInput(
+                backend_id=b.backend_id,
+                model=model,
+                source=pending.source,
+                dialogue_id=pending.dialogue_id,
+                turn_number=int(pending.turn_number),
+                prompt_repr=pr,
+                kvmatch_text=float(pm.ratio),
+                router_inflight=int(router_inflight_decision),
+                router_rps_1s=float(router_rps_1s_decision),
+            )
+
+    async def _predict_for_i(i: int) -> dict[str, dict[str, tuple[float, float]]]:
+        # If prompt serialization failed, there are no inputs to score.
+        if not inputs_by_req[i]:
+            return {}
+        return await state.predictors.predict_all(inputs_by_req[i])
+
+    preds_by_req = await asyncio.gather(
+        *[_predict_for_i(i) for i in range(len(batch))],
+        return_exceptions=False,
+    )
+
+    # Schedule per-request tasks with PreparedChatCompletion
     done_cb = _task_done_callback_factory(state.inflight_request_tasks)
 
     for i, pending in enumerate(batch):
+        if pending.future.done():
+            continue  # already failed (e.g. invalid messages)
+
+        backend = assigned[i]
+        backend_model = state.backend_model_by_id.get(backend.backend_id, "")
+        if not backend_model:
+            try_set_future_result(
+                pending.future,
+                (
+                    500,
+                    {
+                        "error": {
+                            "message": f"No configured model for backend {backend.backend_id}"
+                        }
+                    },
+                ),
+            )
+            continue
+
+        pr = prompt_repr_by_i[i]
+        if pr is None:
+            # Should already be done.
+            try_set_future_result(
+                pending.future,
+                (400, {"error": {"message": "Invalid chat messages"}}),
+            )
+            continue
+
+        # Build RouterBackendScore list (stable order of state.backends).
+        backend_scores: list[RouterBackendScore] = []
+        pred_map = preds_by_req[i] if isinstance(preds_by_req[i], dict) else {}
+        pm_map = pm_by_req[i]
+
+        for b in state.backends:
+            pm = pm_map.get(b.backend_id) or PrefixMatch(
+                ratio=0.0, lcp_chars=0, prompt_chars=0, cached_chars=0
+            )
+            pred = pred_map.get(b.backend_id, {})
+            backend_scores.append(
+                RouterBackendScore(
+                    backend_id=b.backend_id,
+                    model=str(state.backend_model_by_id.get(b.backend_id, "")),
+                    cached_prompt_chars=int(pm.cached_chars),
+                    kvmatch_lcp_chars=int(pm.lcp_chars),
+                    kvmatch_text=float(pm.ratio),
+                    pred_latency_ms=float(pred.get("latency_ms", (0.0, 0.0))[0]),
+                    pred_cost_tokens=float(pred.get("cost_tokens", (0.0, 0.0))[0]),
+                    pred_perf_prob=float(pred.get("performance", (0.0, 0.0))[0]),
+                    pred_cache_ratio=float(pred.get("cache_ratio", (0.0, 0.0))[0]),
+                )
+            )
+
+        chosen_inp = inputs_by_req[i].get(backend.backend_id)
+        if chosen_inp is None:
+            try_set_future_result(
+                pending.future,
+                (
+                    500,
+                    {
+                        "error": {
+                            "message": "Internal router error: missing predictor input"
+                        }
+                    },
+                ),
+            )
+            continue
+
         prep = PreparedChatCompletion(
             pending=pending,
-            assigned_backend=assigned[i],
-            cached_text_by_backend=cached_by_req[i],
+            assigned_backend=backend,
+            effective_model=str(backend_model),
+            prompt_repr=str(pr),
+            prompt_chars=int(prompt_chars_by_i[i]),
+            backend_scores=backend_scores,
+            chosen_predictor_input=chosen_inp,
             batch_id=int(info.batch_id),
             batch_size=int(info.batch_size),
         )
