@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import List, Sequence, Tuple
 
-from immas.analysis.analyzer_series import _is_finite
+from immas.analysis.utils import _is_finite
 
 
 def _binned_means(

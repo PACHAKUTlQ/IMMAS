@@ -6,8 +6,6 @@ All matplotlib plotting for the analyzer.
 This module is intentionally isolated so that:
 - the main analyzer can run without matplotlib
 - the plotting code doesn't dominate run_analyzer.py
-
-Logic is copied from the original run_analyzer.py.
 """
 
 from __future__ import annotations
@@ -16,19 +14,17 @@ import math
 
 from collections import defaultdict
 from pathlib import Path
-from typing import Any, Mapping, Sequence, DefaultDict, List
+from typing import Any, DefaultDict, List, Mapping, Sequence
 
 from immas.analysis.analyzer_bins import _binned_means
+from immas.analysis.analyzer_metrics import extract_perf_pairs_from_records
 from immas.analysis.analyzer_series import (
-    _finite_pairs,
-    _is_finite,
-    _pearsonr_finite,
     _safe_float_series,
     _safe_int_series,
     _sanitize_file_stem,
 )
 from immas.analysis.analyzer_types import DialogueSeries
-from immas.analysis.utils import _s, _short_id, quantile
+from immas.analysis.utils import _s, _short_id, quantile, _is_finite, _pearsonr_finite
 
 
 def _write_plots(
@@ -41,11 +37,8 @@ def _write_plots(
     obs_cost: Sequence[float],
     pred_cache: Sequence[float],
     obs_cache: Sequence[float],
-    kvmatch: Sequence[float],
-    obs_cache2: Sequence[float],
     dialogue_series: Sequence[DialogueSeries],
     top_lat: Sequence[Mapping[str, Any]],
-    suspicious: Sequence[Mapping[str, Any]],
     max_dialogue_plots: int,
     min_dialogue_turns: int,
     topk: int,
@@ -66,10 +59,19 @@ def _write_plots(
 
     obs_cache_ratio_all = _safe_float_series(ok_by_end, "obs_cache_ratio")
     pred_cache_ratio_all = _safe_float_series(ok_by_end, "pred_cache_ratio")
-    kvmatch_all = _safe_float_series(ok_by_end, "kvmatch_text")
 
     obs_prompt_tokens_all = _safe_int_series(ok_by_end, "obs_prompt_tokens")
     obs_cached_tokens_all = _safe_int_series(ok_by_end, "obs_cached_tokens")
+
+    pred_perf_prob_all = _safe_float_series(ok_by_end, "pred_perf_prob")
+    correct_all = [bool(r.get("correct", True)) for r in ok_by_end]
+    correct_all_float = [1.0 if c else 0.0 for c in correct_all]
+
+    # Backend usage (categorical)
+    backend_ids = [_s(r.get("backend_id")) or "backend_unknown" for r in ok_by_end]
+    backend_counts: dict[str, int] = {}
+    for bid in backend_ids:
+        backend_counts[bid] = backend_counts.get(bid, 0) + 1
 
     obs_lat_finite = [x for x in obs_lat if _is_finite(x)]
     obs_cr_finite = [x for x in obs_cache_ratio_all if _is_finite(x)]
@@ -118,20 +120,17 @@ def _write_plots(
     plt.savefig(outdir / "cost_timeseries.png", dpi=160)
     plt.close()
 
-    # Time series: cache ratio & kvmatch
+    # Time series: cache ratio (no mismatch deep-dive)
     plt.figure(figsize=(12, 5))
     plt.plot(xs_all, obs_cache_ratio_all, label="observed cache ratio", linewidth=1.5)
     plt.plot(
         xs_all,
         pred_cache_ratio_all,
-        label="predicted cache ratio",
+        label="pred_cache_ratio (router prefix proxy)",
         linewidth=1.0,
-        alpha=0.8,
+        alpha=0.85,
     )
-    plt.plot(
-        xs_all, kvmatch_all, label="kvmatch_text (proxy)", linewidth=1.0, alpha=0.8
-    )
-    plt.title("KV cache reuse over time (completion order)")
+    plt.title("Cache reuse over time (completion order)")
     plt.xlabel("request index (by completion time)")
     plt.ylabel("ratio")
     plt.ylim(-0.05, 1.05)
@@ -139,6 +138,44 @@ def _write_plots(
     plt.tight_layout()
     plt.savefig(outdir / "cache_ratio_timeseries.png", dpi=160)
     plt.close()
+
+    # Time series: performance probability vs correctness
+    plt.figure(figsize=(12, 5))
+    plt.plot(
+        xs_all,
+        pred_perf_prob_all,
+        label="pred_perf_prob",
+        linewidth=1.5,
+        alpha=0.9,
+    )
+    plt.plot(
+        xs_all,
+        correct_all_float,
+        label="correct (0/1)",
+        linewidth=1.0,
+        alpha=0.7,
+    )
+    plt.title("Performance probability over time (completion order)")
+    plt.xlabel("request index (by completion time)")
+    plt.ylabel("probability / label")
+    plt.ylim(-0.05, 1.05)
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(outdir / "performance_timeseries.png", dpi=160)
+    plt.close()
+
+    # Backend usage bar plot
+    if backend_counts:
+        labels = sorted(backend_counts.keys())
+        counts = [backend_counts[k] for k in labels]
+        plt.figure(figsize=(10, 4))
+        plt.bar(labels, counts, alpha=0.85)
+        plt.title("Backend usage (count of successful requests)")
+        plt.xlabel("backend_id")
+        plt.ylabel("count")
+        plt.tight_layout()
+        plt.savefig(outdir / "backend_usage_bar.png", dpi=160)
+        plt.close()
 
     # Scatter: predicted vs observed latency
     if pred_lat and obs_lat:
@@ -172,40 +209,6 @@ def _write_plots(
         plt.savefig(outdir / "cost_scatter.png", dpi=160)
         plt.close()
 
-    # Scatter: kvmatch_text vs observed cache ratio
-    if kvmatch and obs_cache2:
-        plt.figure(figsize=(6, 6))
-        plt.scatter(kvmatch, obs_cache2, s=10, alpha=0.6)
-        plt.plot(
-            [0.0, 1.0],
-            [0.0, 1.0],
-            linestyle="--",
-            linewidth=1,
-            color="black",
-            alpha=0.5,
-        )
-        plt.title("kvmatch_text (proxy) vs observed cache ratio")
-        plt.xlabel("kvmatch_text")
-        plt.ylabel("obs_cache_ratio")
-        plt.xlim(-0.05, 1.05)
-        plt.ylim(-0.05, 1.05)
-        plt.tight_layout()
-        plt.savefig(outdir / "kvmatch_vs_obs_cache_ratio.png", dpi=160)
-        plt.close()
-
-    # Scatter: observed cache ratio vs observed latency
-    xs_cr_lat, ys_cr_lat = _finite_pairs(obs_cache_ratio_all, obs_lat_all_plot)
-    if xs_cr_lat and ys_cr_lat:
-        plt.figure(figsize=(6, 6))
-        plt.scatter(xs_cr_lat, ys_cr_lat, s=10, alpha=0.6)
-        plt.title("Observed cache ratio vs observed latency")
-        plt.xlabel("obs_cache_ratio")
-        plt.ylabel("obs_latency_ms")
-        plt.xlim(-0.05, 1.05)
-        plt.tight_layout()
-        plt.savefig(outdir / "obs_cache_ratio_vs_latency.png", dpi=160)
-        plt.close()
-
     # -------------------------------------------------------------------------
     # Additional figures: distributions, residuals, calibration
     # -------------------------------------------------------------------------
@@ -229,28 +232,22 @@ def _write_plots(
         plt.savefig(outdir / "obs_cache_ratio_hist.png", dpi=160)
         plt.close()
 
-    if pred_cache and obs_cache:
-        plt.figure(figsize=(6, 6))
-        plt.scatter(pred_cache, obs_cache, s=10, alpha=0.6)
-        plt.plot(
-            [0.0, 1.0],
-            [0.0, 1.0],
-            linestyle="--",
-            linewidth=1,
-            color="black",
-            alpha=0.5,
-        )
-        plt.title("Predicted vs observed cache ratio")
-        plt.xlabel("pred_cache_ratio")
-        plt.ylabel("obs_cache_ratio")
-        plt.xlim(-0.05, 1.05)
-        plt.ylim(-0.05, 1.05)
+    # Performance distribution + calibration curve
+    ps, ys = extract_perf_pairs_from_records([dict(r) for r in ok_by_end])
+    if ps:
+        plt.figure(figsize=(7, 5))
+        plt.hist(ps, bins=30, range=(0.0, 1.0), alpha=0.85)
+        plt.title("pred_perf_prob distribution")
+        plt.xlabel("pred_perf_prob")
+        plt.ylabel("count")
         plt.tight_layout()
-        plt.savefig(outdir / "pred_cache_ratio_vs_obs_cache_ratio.png", dpi=160)
+        plt.savefig(outdir / "pred_perf_prob_hist.png", dpi=160)
         plt.close()
 
+    if ps and ys:
+        ys_float = [1.0 if y else 0.0 for y in ys]
         centers, means_y, _counts = _binned_means(
-            pred_cache, obs_cache, n_bins=20, x_min=0.0, x_max=1.0
+            ps, ys_float, n_bins=20, x_min=0.0, x_max=1.0
         )
         if centers and means_y:
             plt.figure(figsize=(7, 5))
@@ -259,7 +256,7 @@ def _write_plots(
                 means_y,
                 marker="o",
                 linewidth=1.5,
-                label="mean obs_cache_ratio per pred bin",
+                label="mean correct per pred bin",
             )
             plt.plot(
                 [0.0, 1.0],
@@ -270,16 +267,17 @@ def _write_plots(
                 alpha=0.5,
                 label="ideal",
             )
-            plt.title("Cache ratio calibration (reliability curve)")
-            plt.xlabel("pred_cache_ratio (binned)")
-            plt.ylabel("mean obs_cache_ratio")
+            plt.title("Performance calibration (reliability curve)")
+            plt.xlabel("pred_perf_prob (binned)")
+            plt.ylabel("mean correct")
             plt.xlim(-0.05, 1.05)
             plt.ylim(-0.05, 1.05)
             plt.legend()
             plt.tight_layout()
-            plt.savefig(outdir / "cache_ratio_calibration_curve.png", dpi=160)
+            plt.savefig(outdir / "performance_calibration_curve.png", dpi=160)
             plt.close()
 
+    # Residual histograms: latency, cost
     if pred_lat and obs_lat:
         resid = [o - p for p, o in zip(pred_lat, obs_lat)]
         plt.figure(figsize=(7, 5))
@@ -300,17 +298,6 @@ def _write_plots(
         plt.ylabel("count")
         plt.tight_layout()
         plt.savefig(outdir / "cost_residuals_hist.png", dpi=160)
-        plt.close()
-
-    if pred_cache and obs_cache:
-        resid = [o - p for p, o in zip(pred_cache, obs_cache)]
-        plt.figure(figsize=(7, 5))
-        plt.hist(resid, bins=60, alpha=0.85)
-        plt.title("Cache-ratio residuals distribution (obs - pred)")
-        plt.xlabel("residual_cache_ratio")
-        plt.ylabel("count")
-        plt.tight_layout()
-        plt.savefig(outdir / "cache_ratio_residuals_hist.png", dpi=160)
         plt.close()
 
     # Cached tokens vs prompt tokens (sanity scatter)
@@ -356,23 +343,20 @@ def _write_plots(
         plt.close()
 
     # -------------------------------------------------------------------------
-    # Within-dialogue / per-turn visualization
+    # Within-dialogue / per-turn visualization (canonical per-turn)
     # -------------------------------------------------------------------------
-    # NOTE: The per-turn profile plot depends on per-turn aggregates constructed in run_analyzer.py.
-    # We keep the original behavior by reconstructing those arrays from dialogue_series here.
-
-    by_turn_cache: DefaultDict[int, List[float]] = defaultdict(list)
-    by_turn_kvmatch: DefaultDict[int, List[float]] = defaultdict(list)
+    by_turn_obs_cache: DefaultDict[int, List[float]] = defaultdict(list)
+    by_turn_pred_cache: DefaultDict[int, List[float]] = defaultdict(list)
     by_turn_latency: DefaultDict[int, List[float]] = defaultdict(list)
 
     for s in dialogue_series:
-        for t, cr, kv, lat in zip(
-            s.turns, s.obs_cache_ratio, s.kvmatch_text, s.obs_latency_ms
+        for t, ocr, pcr, lat in zip(
+            s.turns, s.obs_cache_ratio, s.pred_cache_ratio, s.obs_latency_ms
         ):
-            if _is_finite(cr):
-                by_turn_cache[t].append(float(cr))
-            if _is_finite(kv):
-                by_turn_kvmatch[t].append(float(kv))
+            if _is_finite(ocr):
+                by_turn_obs_cache[t].append(float(ocr))
+            if _is_finite(pcr):
+                by_turn_pred_cache[t].append(float(pcr))
             if _is_finite(lat):
                 by_turn_latency[t].append(float(lat))
 
@@ -386,13 +370,13 @@ def _write_plots(
             return (quantile(v, 0.25), quantile(v, 0.50), quantile(v, 0.75))
 
         t_x: list[int] = []
-        cache_p25: list[float] = []
-        cache_p50: list[float] = []
-        cache_p75: list[float] = []
+        obs_cache_p25: list[float] = []
+        obs_cache_p50: list[float] = []
+        obs_cache_p75: list[float] = []
 
-        kv_p25: list[float] = []
-        kv_p50: list[float] = []
-        kv_p75: list[float] = []
+        pred_cache_p25: list[float] = []
+        pred_cache_p50: list[float] = []
+        pred_cache_p75: list[float] = []
 
         lat_p25: list[float] = []
         lat_p50: list[float] = []
@@ -401,15 +385,15 @@ def _write_plots(
         for t in turns:
             t_x.append(t)
 
-            a, b, c = _band(by_turn_cache[t])
-            cache_p25.append(a)
-            cache_p50.append(b)
-            cache_p75.append(c)
+            a, b, c = _band(by_turn_obs_cache[t])
+            obs_cache_p25.append(a)
+            obs_cache_p50.append(b)
+            obs_cache_p75.append(c)
 
-            a, b, c = _band(by_turn_kvmatch[t])
-            kv_p25.append(a)
-            kv_p50.append(b)
-            kv_p75.append(c)
+            a, b, c = _band(by_turn_pred_cache[t])
+            pred_cache_p25.append(a)
+            pred_cache_p50.append(b)
+            pred_cache_p75.append(c)
 
             a, b, c = _band(by_turn_latency[t])
             lat_p25.append(a)
@@ -419,12 +403,24 @@ def _write_plots(
         plt.figure(figsize=(12, 10))
 
         ax1 = plt.subplot(3, 1, 1)
-        ax1.plot(t_x, cache_p50, label="obs_cache_ratio p50", linewidth=1.8)
+        ax1.plot(t_x, obs_cache_p50, label="obs_cache_ratio p50", linewidth=1.8)
         ax1.fill_between(
-            t_x, cache_p25, cache_p75, alpha=0.2, label="obs_cache_ratio p25-p75"
+            t_x,
+            obs_cache_p25,
+            obs_cache_p75,
+            alpha=0.2,
+            label="obs_cache_ratio p25-p75",
         )
-        ax1.plot(t_x, kv_p50, label="kvmatch_text p50", linewidth=1.2, alpha=0.9)
-        ax1.fill_between(t_x, kv_p25, kv_p75, alpha=0.15, label="kvmatch_text p25-p75")
+        ax1.plot(
+            t_x, pred_cache_p50, label="pred_cache_ratio p50", linewidth=1.2, alpha=0.9
+        )
+        ax1.fill_between(
+            t_x,
+            pred_cache_p25,
+            pred_cache_p75,
+            alpha=0.15,
+            label="pred_cache_ratio p25-p75",
+        )
         ax1.set_title("Per-turn profile across dialogues (canonical per-turn)")
         ax1.set_xlabel("turn_number")
         ax1.set_ylabel("ratio")
@@ -453,8 +449,6 @@ def _write_plots(
     must_include: set[str] = set()
     for r in top_lat:
         must_include.add(_s(r.get("dialogue_id")))
-    for r in suspicious[:topk]:
-        must_include.add(_s(r.get("dialogue_id")))
 
     candidates = [
         s for s in dialogue_series if len(s.turns) >= int(max(1, min_dialogue_turns))
@@ -470,12 +464,14 @@ def _write_plots(
         if s is not None:
             selected.append(s)
 
+    selected_ids = {x.dialogue_id for x in selected}
     for s in candidates_sorted:
         if len(selected) >= int(max(0, max_dialogue_plots)):
             break
-        if s.dialogue_id in {x.dialogue_id for x in selected}:
+        if s.dialogue_id in selected_ids:
             continue
         selected.append(s)
+        selected_ids.add(s.dialogue_id)
 
     def _plot_dialogue_trace(s: DialogueSeries, out_path: Path) -> None:
         xs = s.turns
@@ -491,14 +487,6 @@ def _write_plots(
             s.pred_cache_ratio,
             marker="o",
             label="pred_cache_ratio",
-            linewidth=1.2,
-            alpha=0.85,
-        )
-        ax1.plot(
-            xs,
-            s.kvmatch_text,
-            marker="o",
-            label="kvmatch_text (proxy)",
             linewidth=1.2,
             alpha=0.85,
         )
@@ -545,10 +533,8 @@ def _write_plots(
 
         sid = _short_id(s.dialogue_id, 24)
         corr_cl = _pearsonr_finite(s.obs_cache_ratio, s.obs_latency_ms)
-        corr_kc = _pearsonr_finite(s.kvmatch_text, s.obs_cache_ratio)
         plt.suptitle(
-            f"Dialogue trace did={sid}  turns={len(xs)}  "
-            f"corr(cache,lat)={corr_cl:.3f}  corr(kvmatch,cache)={corr_kc:.3f}",
+            f"Dialogue trace did={sid}  turns={len(xs)}  corr(cache,lat)={corr_cl:.3f}",
             y=0.99,
         )
         plt.tight_layout(rect=(0, 0, 1, 0.96))

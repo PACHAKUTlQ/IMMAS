@@ -15,37 +15,10 @@ import hashlib
 import math
 import re
 
-from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Sequence
 
 from immas.analysis.analyzer_types import DialogueSeries
-from immas.analysis.utils import _f, _i, pearsonr
-
-
-def _is_finite(x: float) -> bool:
-    return not (math.isnan(x) or math.isinf(x))
-
-
-def _finite_pairs(
-    xs: Sequence[float], ys: Sequence[float]
-) -> Tuple[List[float], List[float]]:
-    """
-    Filter (x, y) pairs where both are finite, preserving alignment.
-    """
-
-    out_x: List[float] = []
-    out_y: List[float] = []
-    for x, y in zip(xs, ys):
-        xf = float(x)
-        yf = float(y)
-        if _is_finite(xf) and _is_finite(yf):
-            out_x.append(xf)
-            out_y.append(yf)
-    return out_x, out_y
-
-
-def _pearsonr_finite(xs: Sequence[float], ys: Sequence[float]) -> float:
-    x2, y2 = _finite_pairs(xs, ys)
-    return pearsonr(x2, y2)
+from immas.analysis.utils import _f, _i
 
 
 def _safe_float_series(records: Sequence[Mapping[str, Any]], key: str) -> List[float]:
