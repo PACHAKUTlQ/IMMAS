@@ -299,18 +299,26 @@ def main() -> None:
         by_turn_obs_cache,
         by_turn_pred_cache,
         by_turn_latency,
+        by_turn_pred_cost,
+        by_turn_obs_total,
+        by_turn_pred_perf,
+        by_turn_correct,
         by_turn_prompt_tok,
         by_turn_cached_tok,
     ) = _compute_per_turn_aggregates(dialogue_series)
+
     _print_per_turn_aggregates(
         by_turn_obs_cache=by_turn_obs_cache,
         by_turn_pred_cache=by_turn_pred_cache,
         by_turn_latency=by_turn_latency,
+        by_turn_pred_cost=by_turn_pred_cost,
+        by_turn_obs_total=by_turn_obs_total,
+        by_turn_pred_perf=by_turn_pred_perf,
+        by_turn_correct=by_turn_correct,
         by_turn_prompt_tok=by_turn_prompt_tok,
         by_turn_cached_tok=by_turn_cached_tok,
     )
 
-    # Plots (optional via matplotlib)
     _write_plots(
         outdir=outdir,
         ok_by_end=ok_by_end,

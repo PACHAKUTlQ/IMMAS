@@ -18,7 +18,7 @@ import re
 from typing import Any, Dict, List, Mapping, Optional, Sequence
 
 from immas.analysis.analyzer_types import DialogueSeries
-from immas.analysis.utils import _f, _i
+from immas.analysis.utils import _f, _i, _s
 
 
 def _safe_float_series(records: Sequence[Mapping[str, Any]], key: str) -> List[float]:
@@ -113,11 +113,18 @@ def _build_dialogue_series(
     return DialogueSeries(
         dialogue_id=dialogue_id,
         turns=turns,
+        backend_id=[_s(r.get("backend_id")) for r in per_turn],
+        model=[_s(r.get("model")) for r in per_turn],
+        source=[_s(r.get("source")) for r in per_turn],
         obs_latency_ms=[_f(r.get("obs_latency_ms"), math.nan) for r in per_turn],
         pred_latency_ms=[_f(r.get("pred_latency_ms"), math.nan) for r in per_turn],
         obs_cache_ratio=[_f(r.get("obs_cache_ratio"), math.nan) for r in per_turn],
         pred_cache_ratio=[_f(r.get("pred_cache_ratio"), math.nan) for r in per_turn],
         kvmatch_text=[_f(r.get("kvmatch_text"), math.nan) for r in per_turn],
+        pred_cost_tokens=[_f(r.get("pred_cost_tokens"), math.nan) for r in per_turn],
+        obs_total_tokens=[_i(r.get("obs_total_tokens")) for r in per_turn],
+        pred_perf_prob=[_f(r.get("pred_perf_prob"), math.nan) for r in per_turn],
+        correct=[bool(r.get("correct", True)) for r in per_turn],
         obs_prompt_tokens=[_i(r.get("obs_prompt_tokens")) for r in per_turn],
         obs_cached_tokens=[_i(r.get("obs_cached_tokens")) for r in per_turn],
         prompt_chars=[_i(r.get("prompt_chars")) for r in per_turn],

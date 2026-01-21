@@ -142,19 +142,9 @@ def _write_plots(
     # Time series: performance probability vs correctness
     plt.figure(figsize=(12, 5))
     plt.plot(
-        xs_all,
-        pred_perf_prob_all,
-        label="pred_perf_prob",
-        linewidth=1.5,
-        alpha=0.9,
+        xs_all, pred_perf_prob_all, label="pred_perf_prob", linewidth=1.5, alpha=0.9
     )
-    plt.plot(
-        xs_all,
-        correct_all_float,
-        label="correct (0/1)",
-        linewidth=1.0,
-        alpha=0.7,
-    )
+    plt.plot(xs_all, correct_all_float, label="correct (0/1)", linewidth=1.0, alpha=0.7)
     plt.title("Performance probability over time (completion order)")
     plt.xlabel("request index (by completion time)")
     plt.ylabel("probability / label")
@@ -209,9 +199,7 @@ def _write_plots(
         plt.savefig(outdir / "cost_scatter.png", dpi=160)
         plt.close()
 
-    # -------------------------------------------------------------------------
-    # Additional figures: distributions, residuals, calibration
-    # -------------------------------------------------------------------------
+    # Distributions
     if obs_lat_finite:
         plt.figure(figsize=(7, 5))
         plt.hist(obs_lat_finite, bins=50, alpha=0.85)
@@ -348,10 +336,21 @@ def _write_plots(
     by_turn_obs_cache: DefaultDict[int, List[float]] = defaultdict(list)
     by_turn_pred_cache: DefaultDict[int, List[float]] = defaultdict(list)
     by_turn_latency: DefaultDict[int, List[float]] = defaultdict(list)
+    by_turn_pred_cost: DefaultDict[int, List[float]] = defaultdict(list)
+    by_turn_obs_total: DefaultDict[int, List[float]] = defaultdict(list)
+    by_turn_pred_perf: DefaultDict[int, List[float]] = defaultdict(list)
+    by_turn_correct: DefaultDict[int, List[float]] = defaultdict(list)
 
     for s in dialogue_series:
-        for t, ocr, pcr, lat in zip(
-            s.turns, s.obs_cache_ratio, s.pred_cache_ratio, s.obs_latency_ms
+        for t, ocr, pcr, lat, pc, ot, pp, corr in zip(
+            s.turns,
+            s.obs_cache_ratio,
+            s.pred_cache_ratio,
+            s.obs_latency_ms,
+            s.pred_cost_tokens,
+            [float(x) for x in s.obs_total_tokens],
+            s.pred_perf_prob,
+            s.correct,
         ):
             if _is_finite(ocr):
                 by_turn_obs_cache[t].append(float(ocr))
@@ -359,17 +358,25 @@ def _write_plots(
                 by_turn_pred_cache[t].append(float(pcr))
             if _is_finite(lat):
                 by_turn_latency[t].append(float(lat))
+            if _is_finite(pc):
+                by_turn_pred_cost[t].append(float(pc))
+            if _is_finite(ot):
+                by_turn_obs_total[t].append(float(ot))
+            if _is_finite(pp):
+                by_turn_pred_perf[t].append(float(pp))
+            by_turn_correct[t].append(1.0 if bool(corr) else 0.0)
 
     turns = sorted(by_turn_latency.keys())
     if turns:
 
         def _band(vals: Sequence[float]) -> tuple[float, float, float]:
-            v = [x for x in vals if _is_finite(float(x))]
+            v = [float(x) for x in vals if _is_finite(float(x))]
             if not v:
                 return (math.nan, math.nan, math.nan)
             return (quantile(v, 0.25), quantile(v, 0.50), quantile(v, 0.75))
 
         t_x: list[int] = []
+
         obs_cache_p25: list[float] = []
         obs_cache_p50: list[float] = []
         obs_cache_p75: list[float] = []
@@ -381,6 +388,12 @@ def _write_plots(
         lat_p25: list[float] = []
         lat_p50: list[float] = []
         lat_p75: list[float] = []
+
+        pred_cost_p50: list[float] = []
+        obs_total_p50: list[float] = []
+
+        pred_perf_p50: list[float] = []
+        correct_mean: list[float] = []
 
         for t in turns:
             t_x.append(t)
@@ -400,9 +413,31 @@ def _write_plots(
             lat_p50.append(b)
             lat_p75.append(c)
 
-        plt.figure(figsize=(12, 10))
+            pred_cost_p50.append(
+                quantile(by_turn_pred_cost[t], 0.50)
+                if by_turn_pred_cost[t]
+                else math.nan
+            )
+            obs_total_p50.append(
+                quantile(by_turn_obs_total[t], 0.50)
+                if by_turn_obs_total[t]
+                else math.nan
+            )
 
-        ax1 = plt.subplot(3, 1, 1)
+            pred_perf_p50.append(
+                quantile(by_turn_pred_perf[t], 0.50)
+                if by_turn_pred_perf[t]
+                else math.nan
+            )
+            correct_mean.append(
+                sum(by_turn_correct[t]) / float(len(by_turn_correct[t]))
+                if by_turn_correct[t]
+                else math.nan
+            )
+
+        plt.figure(figsize=(12, 13))
+
+        ax1 = plt.subplot(4, 1, 1)
         ax1.plot(t_x, obs_cache_p50, label="obs_cache_ratio p50", linewidth=1.8)
         ax1.fill_between(
             t_x,
@@ -427,7 +462,7 @@ def _write_plots(
         ax1.set_ylim(-0.05, 1.05)
         ax1.legend(loc="best")
 
-        ax2 = plt.subplot(3, 1, 2, sharex=ax1)
+        ax2 = plt.subplot(4, 1, 2, sharex=ax1)
         ax2.plot(t_x, lat_p50, label="obs_latency_ms p50", linewidth=1.8)
         ax2.fill_between(
             t_x, lat_p25, lat_p75, alpha=0.2, label="obs_latency_ms p25-p75"
@@ -436,11 +471,23 @@ def _write_plots(
         ax2.set_ylabel("latency (ms)")
         ax2.legend(loc="best")
 
-        ax3 = plt.subplot(3, 1, 3, sharex=ax1)
-        counts = [len(by_turn_latency[t]) for t in t_x]
-        ax3.bar(t_x, counts, alpha=0.85)
+        ax3 = plt.subplot(4, 1, 3, sharex=ax1)
+        ax3.plot(t_x, obs_total_p50, label="obs_total_tokens p50", linewidth=1.8)
+        ax3.plot(
+            t_x, pred_cost_p50, label="pred_cost_tokens p50", linewidth=1.2, alpha=0.9
+        )
         ax3.set_xlabel("turn_number")
-        ax3.set_ylabel("n dialogues (with this turn)")
+        ax3.set_ylabel("tokens")
+        ax3.legend(loc="best")
+
+        ax4 = plt.subplot(4, 1, 4, sharex=ax1)
+        ax4.plot(t_x, pred_perf_p50, label="pred_perf_prob p50", linewidth=1.5)
+        ax4.plot(t_x, correct_mean, label="mean correct", linewidth=1.5, alpha=0.85)
+        ax4.set_xlabel("turn_number")
+        ax4.set_ylabel("prob / rate")
+        ax4.set_ylim(-0.05, 1.05)
+        ax4.legend(loc="best")
+
         plt.tight_layout()
         plt.savefig(outdir / "per_turn_profiles.png", dpi=160)
         plt.close()
@@ -459,6 +506,7 @@ def _write_plots(
 
     selected: list[DialogueSeries] = []
     did_to_series = {s.dialogue_id: s for s in candidates_sorted}
+
     for did in sorted(must_include):
         s = did_to_series.get(did)
         if s is not None:
@@ -476,9 +524,31 @@ def _write_plots(
     def _plot_dialogue_trace(s: DialogueSeries, out_path: Path) -> None:
         xs = s.turns
 
-        plt.figure(figsize=(12, 9))
+        # map backend_id strings to small integers for plotting
+        backend_order: list[str] = []
+        backend_to_idx: dict[str, int] = {}
+        backend_idx: list[int] = []
+        for b in s.backend_id:
+            if b not in backend_to_idx:
+                backend_to_idx[b] = len(backend_order)
+                backend_order.append(b)
+            backend_idx.append(backend_to_idx[b])
 
-        ax1 = plt.subplot(3, 1, 1)
+        corr_cl = _pearsonr_finite(s.obs_cache_ratio, s.obs_latency_ms)
+        sid = _short_id(s.dialogue_id, 24)
+        backend_ids_joined = ",".join(sorted(set(s.backend_id)))
+
+        plt.figure(figsize=(12, 15))
+
+        ax0 = plt.subplot(5, 1, 1)
+        ax0.step(xs, backend_idx, where="mid", linewidth=1.5)
+        ax0.set_ylabel("backend")
+        if backend_order:
+            ax0.set_yticks(list(range(len(backend_order))))
+            ax0.set_yticklabels(backend_order)
+        ax0.grid(True, alpha=0.25)
+
+        ax1 = plt.subplot(5, 1, 2, sharex=ax0)
         ax1.plot(
             xs, s.obs_cache_ratio, marker="o", label="obs_cache_ratio", linewidth=1.8
         )
@@ -495,7 +565,7 @@ def _write_plots(
         ax1.legend(loc="best")
         ax1.grid(True, alpha=0.25)
 
-        ax2 = plt.subplot(3, 1, 2, sharex=ax1)
+        ax2 = plt.subplot(5, 1, 3, sharex=ax0)
         ax2.plot(
             xs,
             s.obs_prompt_tokens,
@@ -514,30 +584,47 @@ def _write_plots(
         ax2.legend(loc="best")
         ax2.grid(True, alpha=0.25)
 
-        ax3 = plt.subplot(3, 1, 3, sharex=ax1)
+        ax3 = plt.subplot(5, 1, 4, sharex=ax0)
         ax3.plot(
-            xs, s.obs_latency_ms, marker="o", label="obs_latency_ms", linewidth=1.8
+            xs, s.obs_total_tokens, marker="o", label="obs_total_tokens", linewidth=1.8
         )
         ax3.plot(
             xs,
-            s.pred_latency_ms,
+            s.pred_cost_tokens,
             marker="o",
-            label="pred_latency_ms",
+            label="pred_cost_tokens",
             linewidth=1.2,
             alpha=0.85,
         )
-        ax3.set_xlabel("turn_number")
-        ax3.set_ylabel("latency (ms)")
+        ax3.set_ylabel("tokens")
         ax3.legend(loc="best")
         ax3.grid(True, alpha=0.25)
 
-        sid = _short_id(s.dialogue_id, 24)
-        corr_cl = _pearsonr_finite(s.obs_cache_ratio, s.obs_latency_ms)
-        plt.suptitle(
-            f"Dialogue trace did={sid}  turns={len(xs)}  corr(cache,lat)={corr_cl:.3f}",
-            y=0.99,
+        ax4 = plt.subplot(5, 1, 5, sharex=ax0)
+        correct_float = [1.0 if c else 0.0 for c in s.correct]
+        ax4.plot(
+            xs, s.pred_perf_prob, marker="o", label="pred_perf_prob", linewidth=1.5
         )
-        plt.tight_layout(rect=(0, 0, 1, 0.96))
+        ax4.plot(
+            xs,
+            correct_float,
+            marker="o",
+            label="correct (0/1)",
+            linewidth=1.0,
+            alpha=0.7,
+        )
+        ax4.set_xlabel("turn_number")
+        ax4.set_ylabel("prob / label")
+        ax4.set_ylim(-0.05, 1.05)
+        ax4.legend(loc="best")
+        ax4.grid(True, alpha=0.25)
+
+        plt.suptitle(
+            f"Dialogue trace did={sid} turns={len(xs)} backends={backend_ids_joined} "
+            f"corr(cache,lat)={corr_cl:.3f}",
+            y=0.995,
+        )
+        plt.tight_layout(rect=(0, 0, 1, 0.975))
         plt.savefig(out_path, dpi=160)
         plt.close()
 
