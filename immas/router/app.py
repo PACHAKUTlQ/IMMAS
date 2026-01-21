@@ -287,7 +287,7 @@ def create_app() -> FastAPI:
         async with load_tracker.track() as load:
             inputs_by_backend: dict[str, PredictorInput] = {}
             for b in backends:
-                model = backend_model_by_id.get(b.backend_id, "")
+                model = backend_model_by_id[b.backend_id]
                 pm = pm_by_backend.get(b.backend_id)
                 if pm is None:
                     pm = PrefixMatch(
