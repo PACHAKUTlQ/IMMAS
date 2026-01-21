@@ -72,6 +72,10 @@ async def lifespan(app: FastAPI, cfg: RouterAppConfig):
             "Set router.batching.enabled: true (or remove the key to use defaults)."
         )
 
+    # Use a local reference that is populated before the batcher starts.
+    # This avoids any fragile dependency on app.state initialization order.
+    router_state_ref: dict[str, RouterState] = {}
+
     async def _batch_handler_safe(
         batch: list[PendingChatCompletion], info: MicroBatchInfo
     ) -> None:
@@ -82,9 +86,19 @@ async def lifespan(app: FastAPI, cfg: RouterAppConfig):
         MicroBatcher would drop the batch and callers would hang indefinitely.
         """
 
-        router_state: RouterState = app.state.router_state
+        st = router_state_ref.get("state")
+        if st is None:
+            # Extremely defensive: should not happen because we start the batcher
+            # only after setting router_state_ref["state"].
+            fail_pending_batch(
+                batch,
+                status_code=503,
+                message="Router not ready",
+            )
+            return
+
         try:
-            await handle_chat_batch(router_state, batch, info)
+            await handle_chat_batch(st, batch, info)
         except asyncio.CancelledError:
             raise
         except Exception as e:
@@ -107,7 +121,6 @@ async def lifespan(app: FastAPI, cfg: RouterAppConfig):
         handler=_batch_handler_safe,
         name="immas.chat_completions.microbatcher",
     )
-    await chat_batcher.start()
 
     state = RouterState(
         cfg=cfg,
@@ -124,7 +137,13 @@ async def lifespan(app: FastAPI, cfg: RouterAppConfig):
         rr_lock=rr_lock,
         rr_index=rr_index,
     )
+
+    # Publish state before starting background workers.
+    router_state_ref["state"] = state
     app.state.router_state = state
+
+    # Start batcher only after state is ready.
+    await chat_batcher.start()
 
     yield
 
