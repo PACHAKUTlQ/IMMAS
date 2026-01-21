@@ -51,7 +51,7 @@ from immas.router.backend import HttpOpenAIBackend
 from immas.router.config import RouterAppConfig, load_router_app_config
 from immas.router.logger import AsyncJsonlLogger, RouterBackendScore, RouterLogRecord
 from immas.router.predictor import AsyncBackendPredictorPool, PredictorInput
-from immas.router.prefix_cache import PrefixMatch, TextPrefixCache
+from immas.router.prefix_cache import PrefixMatch, TextPrefixCache, match_prefix
 
 
 _HEADER_RUN_ID = "x-immas-run-id"
@@ -246,26 +246,35 @@ def create_app() -> FastAPI:
         prompt_repr = serialize_chat_messages(messages)
         prompt_chars = len(prompt_repr)
 
-        # Compute KV-match proxy against router-side cache for *each backend*.
-        pm_by_backend: dict[str, PrefixMatch] = {}
+        # Compute KV-match proxy against router-side cache for each backend.
+        #
+        # NOTE: to avoid holding the cache lock for the entire loop, we first
+        # gather cache contents under the lock, then compute matches outside.
+        cached_texts: dict[str, str | None] = {}
         async with cache_lock:
             for b in backends:
-                backend_model = backend_model_by_id.get(b.backend_id, "")
-                if not backend_model:
-                    return JSONResponse(
-                        status_code=500,
-                        content={
-                            "error": {
-                                "message": f"No configured model for backend {b.backend_id}"
-                            }
-                        },
-                    )
-                pm_by_backend[b.backend_id] = cache.match(
+                cached_texts[b.backend_id] = cache.get(
                     backend_id=b.backend_id,
-                    model=backend_model,
+                    model=backend_model_by_id[b.backend_id],
                     dialogue_id=dialogue_id,
-                    prompt_text=prompt_repr,
                 )
+
+        pm_by_backend: dict[str, PrefixMatch] = {}
+        for b in backends:
+            backend_model = backend_model_by_id.get(b.backend_id, "")
+            if not backend_model:
+                return JSONResponse(
+                    status_code=500,
+                    content={
+                        "error": {
+                            "message": f"No configured model for backend {b.backend_id}"
+                        }
+                    },
+                )
+            pm_by_backend[b.backend_id] = match_prefix(
+                prompt_text=prompt_repr,
+                cached_text=cached_texts[b.backend_id],
+            )
 
         # Choose backend
         backend = await _select_backend(req)
