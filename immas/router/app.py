@@ -448,12 +448,8 @@ def create_app() -> FastAPI:
             cached_prompt_chars=int(cached_prompt_chars),
             kvmatch_lcp_chars=int(kvmatch_lcp_chars),
             kvmatch_text=float(kvmatch_text),
-            router_inflight=int(inputs_by_backend[backend.backend_id].router_inflight)
-            if backend.backend_id in inputs_by_backend
-            else 0,
-            router_rps_1s=float(inputs_by_backend[backend.backend_id].router_rps_1s)
-            if backend.backend_id in inputs_by_backend
-            else 0.0,
+            router_inflight=int(inputs_by_backend[backend.backend_id].router_inflight),
+            router_rps_1s=float(inputs_by_backend[backend.backend_id].router_rps_1s),
             pred_latency_ms=float(pred_latency_ms),
             pred_cost_tokens=float(pred_cost_tokens),
             pred_perf_prob=float(pred_perf_prob),
