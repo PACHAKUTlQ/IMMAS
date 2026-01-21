@@ -3,34 +3,42 @@ immas.router.predictor
 
 Online predictor for latency/cost/performance.
 
-Rationale:
-- At routing time, the router already computes an extremely strong proxy for
-  prefix reuse: `kvmatch_text`, derived from deterministic text prefix matching.
-- Training a multi-feature cache ratio model can add avoidable noise and can
-  degrade latency/cost predictions.
+This module now supports *multiple independent predictors*, one per backend, to
+avoid cross-backend interference during online learning.
 
+Key idea
+--------
+Each backend gets its own `AgentPredictor` instance. At routing time, the router
+can:
+- compute backend-specific features (notably `kvmatch_text` via the router prefix cache),
+- run *all* backend predictors to obtain per-backend scores,
+- then (for now) still pick one backend via the current policy (round-robin),
+- and update only the chosen backend predictor with observed outcomes.
+
+Cache ratio
+----------
 We deterministically set:
+
     pred_cache_ratio := clamp(kvmatch_text, 0, 1)
 
 and provide it both:
 - as a logged prediction output ("cache_ratio"), and
 - as an input feature ("pred_cache_ratio") to latency/cost/perf models.
-
-Multi-backend
-------------
-We model backend differences by including `backend_id` as a categorical feature.
 """
 
 from __future__ import annotations
 
+import asyncio
+
 from dataclasses import dataclass
-from typing import Any, Dict, Mapping, Tuple
+from typing import Any, Dict, Iterable, Mapping, Tuple
 
 from river import compose, preprocessing, tree
 
 
 Features = Dict[str, Any]
 MetricPred = Tuple[float, float]
+Predictions = Dict[str, MetricPred]
 
 
 def _clamp01(x: float) -> float:
@@ -87,6 +95,9 @@ class AgentPredictor:
     def _base_features(self, inp: PredictorInput) -> Features:
         return {
             "bias": 1.0,
+            # NOTE: kept for compatibility; in the new design, each backend
+            # has its own predictor instance, so this feature is constant
+            # per predictor and does not cause cross-backend interference.
             "backend_id": inp.backend_id,
             "model": inp.model,
             "source": inp.source,
@@ -104,7 +115,7 @@ class AgentPredictor:
 
         return _clamp01(inp.kvmatch_text)
 
-    def predict(self, inp: PredictorInput) -> Dict[str, MetricPred]:
+    def predict(self, inp: PredictorInput) -> Predictions:
         x_base = self._base_features(inp)
         pred_cache_ratio = self._pred_cache_ratio(inp)
         x = {**x_base, "pred_cache_ratio": float(pred_cache_ratio)}
@@ -153,3 +164,101 @@ class AgentPredictor:
         self.model_latency.learn_one(x, float(real_latency_ms))
         self.model_cost.learn_one(x, float(real_cost_tokens))
         self.model_perf.learn_one(x, bool(real_perf_correct))
+
+
+class AsyncBackendPredictorPool:
+    """
+    A set of independent predictors, one per backend_id, with per-backend locks.
+
+    This prevents training data from different backends from interfering, while
+    still allowing the router to obtain scores for *all* backends for each request.
+    """
+
+    def __init__(self, backend_ids: Iterable[str]) -> None:
+        ids = [str(b).strip() for b in backend_ids if str(b).strip()]
+        if not ids:
+            raise ValueError(
+                "AsyncBackendPredictorPool requires at least one backend_id"
+            )
+
+        # Preserve order but ensure uniqueness.
+        seen: set[str] = set()
+        uniq: list[str] = []
+        for b in ids:
+            if b in seen:
+                continue
+            seen.add(b)
+            uniq.append(b)
+
+        self._backend_ids: Tuple[str, ...] = tuple(uniq)
+        self._predictors: dict[str, AgentPredictor] = {
+            b: AgentPredictor() for b in uniq
+        }
+        self._locks: dict[str, asyncio.Lock] = {b: asyncio.Lock() for b in uniq}
+
+    @property
+    def backend_ids(self) -> Tuple[str, ...]:
+        """Backend IDs managed by this pool (stable order)."""
+
+        return self._backend_ids
+
+    def _get(self, backend_id: str) -> tuple[AgentPredictor, asyncio.Lock]:
+        bid = str(backend_id).strip()
+        if bid not in self._predictors:
+            raise KeyError(f"Unknown backend_id for predictor pool: {bid!r}")
+
+        return self._predictors[bid], self._locks[bid]
+
+    async def predict_one(self, inp: PredictorInput) -> Predictions:
+        """Predict metrics for exactly one backend (from inp.backend_id)."""
+
+        pred, lock = self._get(inp.backend_id)
+        async with lock:
+            return pred.predict(inp)
+
+    async def predict_all(
+        self, inputs_by_backend: Mapping[str, PredictorInput]
+    ) -> Dict[str, Predictions]:
+        """
+        Predict metrics for all provided backends.
+
+        Parameters
+        ----------
+        inputs_by_backend
+            Mapping from backend_id -> PredictorInput.
+
+        Returns
+        -------
+        Dict[str, Predictions]
+            Mapping from backend_id -> Predictions.
+        """
+
+        out: Dict[str, Predictions] = {}
+
+        # Acquire one backend lock at a time to avoid lock ordering issues.
+        # (No nested lock acquisition.)
+        for backend_id, inp in inputs_by_backend.items():
+            pred, lock = self._get(backend_id)
+            async with lock:
+                out[backend_id] = pred.predict(inp)
+
+        return out
+
+    async def update_one(
+        self,
+        inp: PredictorInput,
+        *,
+        real_latency_ms: float,
+        real_cost_tokens: int,
+        real_perf_correct: bool,
+    ) -> None:
+        """Update exactly one backend predictor (from inp.backend_id)."""
+
+        pred, lock = self._get(inp.backend_id)
+        async with lock:
+            pred.update(
+                inp,
+                real_latency_ms=float(real_latency_ms),
+                real_cost_tokens=int(real_cost_tokens),
+                real_perf_correct=bool(real_perf_correct),
+            )

@@ -6,12 +6,23 @@ A lightweight OpenAI-compatible router that:
 - computes router-side features (including text-based KV match proxy)
 - selects a backend (currently: round-robin)
 - forwards the request to the chosen backend
-- logs + online-trains a predictor based on observed outcomes
+- logs + online-trains predictors based on observed outcomes
 - uses backend API keys from its own YAML configuration.
 
-Cache ratio prediction
+Multi-predictor design
 ----------------------
-We treat `pred_cache_ratio := kvmatch_text` and feed that deterministic value into the latency/cost/perf models.
+We maintain *one independent online predictor per backend*, to avoid
+cross-backend training interference.
+
+For each incoming request, the router:
+1) computes backend-specific router-side features (notably `kvmatch_text`),
+2) runs all backend predictors to produce per-backend scores,
+3) selects a single backend via round-robin,
+4) forwards request to the chosen backend,
+5) updates only the chosen backend's predictor with observed outcomes.
+
+Auction-based routing will be added later; the router log now includes per-backend
+score vectors to support that future step.
 
 Router-side prefix cache eviction
 ---------------------------------
@@ -38,9 +49,9 @@ from immas.openai.chat import extract_first_assistant_message, serialize_chat_me
 from immas.openai.usage import ParsedUsage, parse_usage
 from immas.router.backend import HttpOpenAIBackend
 from immas.router.config import RouterAppConfig, load_router_app_config
-from immas.router.logger import AsyncJsonlLogger, RouterLogRecord
-from immas.router.predictor import AgentPredictor, PredictorInput
-from immas.router.prefix_cache import TextPrefixCache
+from immas.router.logger import AsyncJsonlLogger, RouterBackendScore, RouterLogRecord
+from immas.router.predictor import AsyncBackendPredictorPool, PredictorInput
+from immas.router.prefix_cache import PrefixMatch, TextPrefixCache
 
 
 _HEADER_RUN_ID = "x-immas-run-id"
@@ -105,6 +116,7 @@ def _should_evict_router_prefix_cache(
     bool
         True if the router should evict its prefix cache record and skip updating it.
     """
+
     if turn_number <= 1:
         # Eviction only matters when we expected reuse.
         return False
@@ -129,10 +141,6 @@ def create_app() -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
-        # Predictor state (online learning) - protect with lock.
-        app.state.predictor = AgentPredictor()
-        app.state.predictor_lock = asyncio.Lock()
-
         # Router feature cache (text prefix) - protect with lock.
         app.state.prefix_cache = TextPrefixCache()
         app.state.prefix_cache_lock = asyncio.Lock()
@@ -150,6 +158,11 @@ def create_app() -> FastAPI:
             for b in cfg.backends
         ]
         app.state.backend_model_by_id = {b.backend_id: b.model for b in cfg.backends}
+
+        # Independent predictor per backend (no cross-backend interference).
+        app.state.predictors = AsyncBackendPredictorPool(
+            backend_ids=[b.backend_id for b in cfg.backends]
+        )
 
         # Round-robin state.
         app.state.rr_lock = asyncio.Lock()
@@ -195,6 +208,7 @@ def create_app() -> FastAPI:
         because backends may expose different model names and the client should
         not choose backend models directly.
         """
+
         backend_model_by_id: dict[str, str] = req.app.state.backend_model_by_id
         seen: set[str] = set()
         data: list[dict[str, Any]] = []
@@ -203,16 +217,15 @@ def create_app() -> FastAPI:
                 continue
             seen.add(m)
             data.append({"id": m, "object": "model"})
+
         return JSONResponse(status_code=200, content={"object": "list", "data": data})
 
     @app.post("/v1/chat/completions", response_model=None)
     async def chat_completions(req: Request) -> JSONResponse:
-        backend = await _select_backend(req)
+        backends: list[HttpOpenAIBackend] = req.app.state.backends
         backend_model_by_id: dict[str, str] = req.app.state.backend_model_by_id
-        backend_model = backend_model_by_id.get(backend.backend_id, "")
 
-        predictor: AgentPredictor = req.app.state.predictor
-        predictor_lock: asyncio.Lock = req.app.state.predictor_lock
+        predictors: AsyncBackendPredictorPool = req.app.state.predictors
         cache: TextPrefixCache = req.app.state.prefix_cache
         cache_lock: asyncio.Lock = req.app.state.prefix_cache_lock
         load_tracker: AsyncLoadTracker = req.app.state.load_tracker
@@ -229,7 +242,34 @@ def create_app() -> FastAPI:
                 status_code=400, content={"error": {"message": "Invalid JSON body"}}
             )
 
-        # Client-provided model is ignored; router enforces backend-specific model.
+        messages = body.get("messages")
+        prompt_repr = serialize_chat_messages(messages)
+        prompt_chars = len(prompt_repr)
+
+        # Compute KV-match proxy against router-side cache for *each backend*.
+        pm_by_backend: dict[str, PrefixMatch] = {}
+        async with cache_lock:
+            for b in backends:
+                backend_model = backend_model_by_id.get(b.backend_id, "")
+                if not backend_model:
+                    return JSONResponse(
+                        status_code=500,
+                        content={
+                            "error": {
+                                "message": f"No configured model for backend {b.backend_id}"
+                            }
+                        },
+                    )
+                pm_by_backend[b.backend_id] = cache.match(
+                    backend_id=b.backend_id,
+                    model=backend_model,
+                    dialogue_id=dialogue_id,
+                    prompt_text=prompt_repr,
+                )
+
+        # Choose backend
+        backend = await _select_backend(req)
+        backend_model = backend_model_by_id.get(backend.backend_id, "")
         if not backend_model:
             return JSONResponse(
                 status_code=500,
@@ -243,44 +283,46 @@ def create_app() -> FastAPI:
         # Use *effective* model for feature computation / caching / logging.
         effective_model = backend_model
 
-        messages = body.get("messages")
-        prompt_repr = serialize_chat_messages(messages)
-        prompt_chars = len(prompt_repr)
-
-        # KV-match proxy against router-side cache *for the chosen backend*.
-        async with cache_lock:
-            pm = cache.match(
-                backend_id=backend.backend_id,
-                model=effective_model,
-                dialogue_id=dialogue_id,
-                prompt_text=prompt_repr,
-            )
-        kvmatch_text = float(pm.ratio)
-        cached_prompt_chars = int(pm.cached_chars)
-        kvmatch_lcp_chars = int(pm.lcp_chars)
-
+        # Predict for all backends under the router load-tracker context.
         async with load_tracker.track() as load:
-            inp = PredictorInput(
-                backend_id=backend.backend_id,
-                model=effective_model,
-                source=source,
-                dialogue_id=dialogue_id,
-                turn_number=turn_number,
-                prompt_repr=prompt_repr,
-                kvmatch_text=float(kvmatch_text),
-                router_inflight=int(load.inflight_requests),
-                router_rps_1s=float(load.rps),
-            )
+            inputs_by_backend: dict[str, PredictorInput] = {}
+            for b in backends:
+                model = backend_model_by_id.get(b.backend_id, "")
+                pm = pm_by_backend.get(b.backend_id)
+                if pm is None:
+                    pm = PrefixMatch(
+                        ratio=0.0, lcp_chars=0, prompt_chars=0, cached_chars=0
+                    )
 
-            # Predict
-            async with predictor_lock:
-                pred = predictor.predict(inp)
+                inputs_by_backend[b.backend_id] = PredictorInput(
+                    backend_id=b.backend_id,
+                    model=model,
+                    source=source,
+                    dialogue_id=dialogue_id,
+                    turn_number=turn_number,
+                    prompt_repr=prompt_repr,
+                    kvmatch_text=float(pm.ratio),
+                    router_inflight=int(load.inflight_requests),
+                    router_rps_1s=float(load.rps),
+                )
 
-            pred_latency_ms = float(pred["latency_ms"][0])
-            pred_cost_tokens = float(pred["cost_tokens"][0])
-            pred_perf_prob = float(pred["performance"][0])
-            # deterministic == kvmatch_text
-            pred_cache_ratio = float(pred["cache_ratio"][0])
+            preds_by_backend = await predictors.predict_all(inputs_by_backend)
+
+            # Extract chosen backend prediction fields (for backwards-compatible top-level logging).
+            chosen_pred = preds_by_backend.get(backend.backend_id, {})
+            pred_latency_ms = float(chosen_pred.get("latency_ms", (0.0, 0.0))[0])
+            pred_cost_tokens = float(chosen_pred.get("cost_tokens", (0.0, 0.0))[0])
+            pred_perf_prob = float(chosen_pred.get("performance", (0.0, 0.0))[0])
+            pred_cache_ratio = float(chosen_pred.get("cache_ratio", (0.0, 0.0))[0])
+
+            chosen_pm = pm_by_backend.get(backend.backend_id)
+            if chosen_pm is None:
+                chosen_pm = PrefixMatch(
+                    ratio=0.0, lcp_chars=0, prompt_chars=0, cached_chars=0
+                )
+            kvmatch_text = float(chosen_pm.ratio)
+            cached_prompt_chars = int(chosen_pm.cached_chars)
+            kvmatch_lcp_chars = int(chosen_pm.lcp_chars)
 
             # Router-controlled headers to backend (no client auth passthrough).
             backend_headers = {
@@ -325,11 +367,12 @@ def create_app() -> FastAPI:
             obs_cache_ratio=float(obs_cache_ratio),
         )
 
-        # Update predictor + cache only on success
+        # Update predictor + cache only on success (chosen backend only).
         if 200 <= status < 300:
-            async with predictor_lock:
-                predictor.update(
-                    inp,
+            chosen_inp = inputs_by_backend.get(backend.backend_id)
+            if chosen_inp is not None:
+                await predictors.update_one(
+                    chosen_inp,
                     real_latency_ms=float(obs_latency_ms),
                     real_cost_tokens=int(obs_total_tokens),
                     real_perf_correct=bool(correct),
@@ -360,6 +403,28 @@ def create_app() -> FastAPI:
         else:
             error = f"backend_status={status}"
 
+        # Build per-backend score list for logging (future auction input).
+        backend_scores: list[RouterBackendScore] = []
+        for b in backends:
+            pm = pm_by_backend.get(b.backend_id)
+            if pm is None:
+                pm = PrefixMatch(ratio=0.0, lcp_chars=0, prompt_chars=0, cached_chars=0)
+
+            pred = preds_by_backend.get(b.backend_id, {})
+            backend_scores.append(
+                RouterBackendScore(
+                    backend_id=b.backend_id,
+                    model=str(backend_model_by_id.get(b.backend_id, "")),
+                    cached_prompt_chars=int(pm.cached_chars),
+                    kvmatch_lcp_chars=int(pm.lcp_chars),
+                    kvmatch_text=float(pm.ratio),
+                    pred_latency_ms=float(pred.get("latency_ms", (0.0, 0.0))[0]),
+                    pred_cost_tokens=float(pred.get("cost_tokens", (0.0, 0.0))[0]),
+                    pred_perf_prob=float(pred.get("performance", (0.0, 0.0))[0]),
+                    pred_cache_ratio=float(pred.get("cache_ratio", (0.0, 0.0))[0]),
+                )
+            )
+
         rec = RouterLogRecord(
             run_id=run_id,
             t_start_monotonic=float(t0),
@@ -374,12 +439,17 @@ def create_app() -> FastAPI:
             cached_prompt_chars=int(cached_prompt_chars),
             kvmatch_lcp_chars=int(kvmatch_lcp_chars),
             kvmatch_text=float(kvmatch_text),
-            router_inflight=int(inp.router_inflight),
-            router_rps_1s=float(inp.router_rps_1s),
+            router_inflight=int(inputs_by_backend[backend.backend_id].router_inflight)
+            if backend.backend_id in inputs_by_backend
+            else 0,
+            router_rps_1s=float(inputs_by_backend[backend.backend_id].router_rps_1s)
+            if backend.backend_id in inputs_by_backend
+            else 0.0,
             pred_latency_ms=float(pred_latency_ms),
             pred_cost_tokens=float(pred_cost_tokens),
             pred_perf_prob=float(pred_perf_prob),
             pred_cache_ratio=float(pred_cache_ratio),
+            backend_scores=backend_scores,
             completion_id=completion_id,
             obs_latency_ms=float(obs_latency_ms),
             obs_prompt_tokens=int(obs_prompt_tokens),
