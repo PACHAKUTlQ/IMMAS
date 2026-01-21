@@ -11,6 +11,12 @@ text and expose:
 
 This ratio is a proxy for prompt prefix reuse, which should correlate with
 backend-reported cached prompt tokens.
+
+Eviction
+--------
+Backends like vLLM may evict prompt-cache entries independently of the router.
+The router can optionally evict its own record when it detects a likely backend
+cache miss (e.g. near-perfect text prefix match but reported cached_tokens ~ 0).
 """
 
 from __future__ import annotations
@@ -49,12 +55,32 @@ class TextPrefixCache:
         self._cache: Dict[CacheKey, str] = {}
 
     def get(self, *, backend_id: str, model: str, dialogue_id: str) -> Optional[str]:
+        """Fetch cached text for this key, if present."""
+
         return self._cache.get((backend_id, model, dialogue_id))
 
     def update(
         self, *, backend_id: str, model: str, dialogue_id: str, cached_text: str
     ) -> None:
+        """Insert/overwrite cached text for this key."""
+
         self._cache[(backend_id, model, dialogue_id)] = cached_text
+
+    def evict(self, *, backend_id: str, model: str, dialogue_id: str) -> bool:
+        """
+        Evict cached text for this key.
+
+        Returns
+        -------
+        bool
+            True if an entry existed and was removed; False otherwise.
+        """
+
+        key: CacheKey = (backend_id, model, dialogue_id)
+        if key in self._cache:
+            del self._cache[key]
+            return True
+        return False
 
     def match(
         self, *, backend_id: str, model: str, dialogue_id: str, prompt_text: str

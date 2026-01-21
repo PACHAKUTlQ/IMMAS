@@ -8,6 +8,17 @@ A lightweight OpenAI-compatible router that:
 - forwards the request to the chosen backend
 - logs + online-trains a predictor based on observed outcomes
 - uses backend API keys from its own YAML configuration.
+
+Cache ratio prediction
+----------------------
+We treat `pred_cache_ratio := kvmatch_text` and feed that deterministic value into the latency/cost/perf models.
+
+Router-side prefix cache eviction
+---------------------------------
+Some backends (e.g. vLLM) may evict prompt-cache entries. When the backend reports
+cached-token accounting and we observe a near-zero cache ratio despite a near-
+perfect prefix match, we conservatively evict the router's corresponding prefix
+cache record and skip updating it for that request.
 """
 
 from __future__ import annotations
@@ -24,7 +35,7 @@ from fastapi.responses import JSONResponse
 
 from immas.common.load import AsyncLoadTracker
 from immas.openai.chat import extract_first_assistant_message, serialize_chat_messages
-from immas.openai.usage import parse_usage
+from immas.openai.usage import ParsedUsage, parse_usage
 from immas.router.backend import HttpOpenAIBackend
 from immas.router.config import RouterAppConfig, load_router_app_config
 from immas.router.logger import AsyncJsonlLogger, RouterLogRecord
@@ -36,6 +47,11 @@ _HEADER_RUN_ID = "x-immas-run-id"
 _HEADER_DIALOGUE_ID = "x-immas-dialogue-id"
 _HEADER_TURN_NUMBER = "x-immas-turn-number"
 _HEADER_SOURCE = "x-immas-source"
+
+# Conservative eviction heuristic thresholds.
+_EVICT_KVMATCH_MIN = 0.8
+_EVICT_OBS_CACHE_MAX = 0.10
+_EVICT_MIN_PROMPT_TOKENS = 64
 
 
 def _get_header(req: Request, name: str) -> str:
@@ -65,6 +81,47 @@ def _load_cfg_from_env() -> RouterAppConfig:
         )
 
     return load_router_app_config(path)
+
+
+def _should_evict_router_prefix_cache(
+    *,
+    usage: ParsedUsage,
+    turn_number: int,
+    kvmatch_text: float,
+    obs_cache_ratio: float,
+) -> bool:
+    """
+    Decide whether to evict the router-side prefix cache record for this key.
+
+    We only attempt eviction detection when the backend explicitly reports cached
+    token accounting (`usage.cached_tokens_known == True`). Otherwise, cached_tokens=0
+    could mean "unreported", and eviction detection would be wrong.
+
+    The heuristic is intentionally conservative: we require near-perfect prefix match,
+    sufficiently large prompts, and near-zero observed cache ratio.
+
+    Returns
+    -------
+    bool
+        True if the router should evict its prefix cache record and skip updating it.
+    """
+    if turn_number <= 1:
+        # Eviction only matters when we expected reuse.
+        return False
+
+    if not usage.cached_tokens_known:
+        return False
+
+    if usage.prompt_tokens < _EVICT_MIN_PROMPT_TOKENS:
+        return False
+
+    if float(kvmatch_text) < _EVICT_KVMATCH_MIN:
+        return False
+
+    if float(obs_cache_ratio) > _EVICT_OBS_CACHE_MAX:
+        return False
+
+    return True
 
 
 def create_app() -> FastAPI:
@@ -222,6 +279,7 @@ def create_app() -> FastAPI:
             pred_latency_ms = float(pred["latency_ms"][0])
             pred_cost_tokens = float(pred["cost_tokens"][0])
             pred_perf_prob = float(pred["performance"][0])
+            # deterministic == kvmatch_text
             pred_cache_ratio = float(pred["cache_ratio"][0])
 
             # Router-controlled headers to backend (no client auth passthrough).
@@ -260,6 +318,13 @@ def create_app() -> FastAPI:
         correct = True
         error: Optional[str] = None
 
+        evict_prefix_cache = _should_evict_router_prefix_cache(
+            usage=usage,
+            turn_number=int(turn_number),
+            kvmatch_text=float(kvmatch_text),
+            obs_cache_ratio=float(obs_cache_ratio),
+        )
+
         # Update predictor + cache only on success
         if 200 <= status < 300:
             async with predictor_lock:
@@ -268,21 +333,30 @@ def create_app() -> FastAPI:
                     real_latency_ms=float(obs_latency_ms),
                     real_cost_tokens=int(obs_total_tokens),
                     real_perf_correct=bool(correct),
-                    real_cache_ratio=float(obs_cache_ratio),
                 )
 
-            # Update router prefix cache using the request messages + returned assistant message
-            assistant = extract_first_assistant_message(resp_json)
-            if assistant is not None and isinstance(messages, list):
-                new_messages = list(messages) + [assistant.to_openai_message()]
-                new_prompt_repr = serialize_chat_messages(new_messages)
+            if evict_prefix_cache:
+                # Backend likely did not have the cached prefix (evicted/disabled);
+                # evict router record and skip updating it for this response.
                 async with cache_lock:
-                    cache.update(
+                    cache.evict(
                         backend_id=backend.backend_id,
                         model=effective_model,
                         dialogue_id=dialogue_id,
-                        cached_text=new_prompt_repr,
                     )
+            else:
+                # Update router prefix cache using request messages + returned assistant message
+                assistant = extract_first_assistant_message(resp_json)
+                if assistant is not None and isinstance(messages, list):
+                    new_messages = list(messages) + [assistant.to_openai_message()]
+                    new_prompt_repr = serialize_chat_messages(new_messages)
+                    async with cache_lock:
+                        cache.update(
+                            backend_id=backend.backend_id,
+                            model=effective_model,
+                            dialogue_id=dialogue_id,
+                            cached_text=new_prompt_repr,
+                        )
         else:
             error = f"backend_status={status}"
 
