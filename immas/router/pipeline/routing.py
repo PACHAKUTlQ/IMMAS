@@ -1,5 +1,5 @@
 """
-immas.router.routing
+immas.router.pipeline.routing
 
 Routing logic for the router app.
 """
@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import asyncio
 
-from immas.router.backend import HttpOpenAIBackend
+from immas.router.components.backend import HttpOpenAIBackend
 from immas.router.state import RouterState
 
 

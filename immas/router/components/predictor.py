@@ -1,5 +1,5 @@
 """
-immas.router.predictor
+immas.router.components.predictor
 
 Online predictor for latency/cost/performance.
 

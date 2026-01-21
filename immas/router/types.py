@@ -10,7 +10,7 @@ import asyncio
 from dataclasses import dataclass
 from typing import Any
 
-from immas.router.backend import HttpOpenAIBackend
+from immas.router.components.backend import HttpOpenAIBackend
 
 
 ChatCompletionResult = tuple[int, dict[str, Any]]

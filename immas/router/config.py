@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal, cast
@@ -7,12 +8,12 @@ from typing import Literal, cast
 import yaml
 
 from immas.router.utils import (
-    _as_mapping,
-    _as_list,
-    _as_str,
     _as_bool,
-    _as_int,
     _as_float,
+    _as_int,
+    _as_list,
+    _as_mapping,
+    _as_str,
 )
 
 RoutingPolicy = Literal["round_robin"]
@@ -163,3 +164,19 @@ def load_router_app_config(path: str) -> RouterAppConfig:
         ),
         backends=backends,
     )
+
+
+def load_cfg_from_env() -> RouterAppConfig:
+    """
+    Load router config from YAML path in env IMMAS_ROUTER_CONFIG.
+
+    This is the primary configuration mechanism.
+    """
+
+    path = (os.environ.get("IMMAS_ROUTER_CONFIG") or "").strip()
+    if not path:
+        raise RuntimeError(
+            "Missing IMMAS_ROUTER_CONFIG. Please set it to a YAML config file path."
+        )
+
+    return load_router_app_config(path)

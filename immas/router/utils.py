@@ -8,13 +8,12 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import os
+
 from typing import Any, Mapping, cast
 
 from fastapi import Request
 
 from immas.openai.usage import ParsedUsage
-from immas.router.config import RouterAppConfig, load_router_app_config
 from immas.router.types import ChatCompletionResult, PendingChatCompletion
 
 
@@ -110,22 +109,6 @@ def _as_float(x: Any, *, ctx: str) -> float:
             raise TypeError(f"Expected float at {ctx}, got {x!r}") from e
 
     raise TypeError(f"Expected float at {ctx}, got {type(x)!r}")
-
-
-def load_cfg_from_env() -> RouterAppConfig:
-    """
-    Load router config from YAML path in env IMMAS_ROUTER_CONFIG.
-
-    This is the primary configuration mechanism.
-    """
-
-    path = (os.environ.get("IMMAS_ROUTER_CONFIG") or "").strip()
-    if not path:
-        raise RuntimeError(
-            "Missing IMMAS_ROUTER_CONFIG. Please set it to a YAML config file path."
-        )
-
-    return load_router_app_config(path)
 
 
 def should_evict_router_prefix_cache(

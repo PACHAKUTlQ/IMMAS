@@ -1,5 +1,5 @@
 """
-immas.router.batching
+immas.router.components.batching
 
 Generic micro-batching infrastructure.
 

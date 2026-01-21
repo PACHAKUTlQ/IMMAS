@@ -1,5 +1,5 @@
 """
-immas.router.processing
+immas.router.pipeline.processing
 
 Core request processing logic for the router app.
 """
@@ -14,11 +14,11 @@ from typing import Any, Callable, Optional
 
 from immas.openai.chat import extract_first_assistant_message, serialize_chat_messages
 from immas.openai.usage import parse_usage
-from immas.router.batching import MicroBatchInfo
-from immas.router.logger import RouterBackendScore, RouterLogRecord
-from immas.router.predictor import PredictorInput
-from immas.router.prefix_cache import PrefixMatch, match_prefix
-from immas.router.routing import select_backends_round_robin
+from immas.router.components.batching import MicroBatchInfo
+from immas.router.components.logger import RouterBackendScore, RouterLogRecord
+from immas.router.components.predictor import PredictorInput
+from immas.router.components.prefix_cache import PrefixMatch, match_prefix
+from immas.router.pipeline.routing import select_backends_round_robin
 from immas.router.state import RouterState
 from immas.router.types import PendingChatCompletion, PreparedChatCompletion
 from immas.router.utils import (

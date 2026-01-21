@@ -1,5 +1,5 @@
 """
-immas.router.prefix_cache
+immas.router.components.prefix_cache
 
 A router-side text prefix cache for computing KV-cache proxy features.
 

@@ -1,5 +1,5 @@
 """
-immas.router.backend
+immas.router.components.backend
 
 Backend abstraction for OpenAI-compatible servers.
 Uses a simple HTTP JSON forwarder.

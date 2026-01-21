@@ -1,3 +1,9 @@
+"""
+immas.router.components.logger
+
+Log request data.
+"""
+
 from __future__ import annotations
 
 import asyncio

@@ -22,13 +22,13 @@ from typing import Any
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
+from immas.router.config import load_cfg_from_env
 from immas.router.lifecycle import lifespan
 from immas.router.state import RouterState
 from immas.router.types import ChatCompletionResult, PendingChatCompletion
 from immas.router.utils import (
     _get_header,
     _parse_turn_number,
-    load_cfg_from_env,
 )
 
 

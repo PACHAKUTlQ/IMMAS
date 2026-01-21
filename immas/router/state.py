@@ -14,12 +14,12 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from immas.common.load import AsyncLoadTracker
-    from immas.router.backend import HttpOpenAIBackend
-    from immas.router.batching import MicroBatcher
+    from immas.router.components.backend import HttpOpenAIBackend
+    from immas.router.components.batching import MicroBatcher
+    from immas.router.components.logger import AsyncJsonlLogger
+    from immas.router.components.predictor import AsyncBackendPredictorPool
+    from immas.router.components.prefix_cache import TextPrefixCache
     from immas.router.config import RouterAppConfig
-    from immas.router.logger import AsyncJsonlLogger
-    from immas.router.predictor import AsyncBackendPredictorPool
-    from immas.router.prefix_cache import TextPrefixCache
     from immas.router.types import PendingChatCompletion
 
 

@@ -15,12 +15,12 @@ from typing import TYPE_CHECKING
 from fastapi import FastAPI
 
 from immas.common.load import AsyncLoadTracker
-from immas.router.backend import HttpOpenAIBackend
-from immas.router.batching import MicroBatchInfo, MicroBatcher
-from immas.router.logger import AsyncJsonlLogger
-from immas.router.predictor import AsyncBackendPredictorPool
-from immas.router.prefix_cache import TextPrefixCache
-from immas.router.processing import handle_chat_batch
+from immas.router.components.backend import HttpOpenAIBackend
+from immas.router.components.batching import MicroBatchInfo, MicroBatcher
+from immas.router.components.logger import AsyncJsonlLogger
+from immas.router.components.predictor import AsyncBackendPredictorPool
+from immas.router.components.prefix_cache import TextPrefixCache
+from immas.router.pipeline.processing import handle_chat_batch
 from immas.router.state import RouterState
 from immas.router.types import PendingChatCompletion
 from immas.router.utils import fail_pending_batch
