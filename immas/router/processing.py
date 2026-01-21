@@ -12,17 +12,14 @@ import time
 
 from typing import Any, Callable, Optional
 
-from fastapi import FastAPI
-
-from immas.common.load import AsyncLoadTracker
 from immas.openai.chat import extract_first_assistant_message, serialize_chat_messages
 from immas.openai.usage import parse_usage
-from immas.router.backend import HttpOpenAIBackend
 from immas.router.batching import MicroBatchInfo
-from immas.router.logger import AsyncJsonlLogger, RouterBackendScore, RouterLogRecord
-from immas.router.predictor import AsyncBackendPredictorPool, PredictorInput
-from immas.router.prefix_cache import PrefixMatch, TextPrefixCache, match_prefix
+from immas.router.logger import RouterBackendScore, RouterLogRecord
+from immas.router.predictor import PredictorInput
+from immas.router.prefix_cache import PrefixMatch, match_prefix
 from immas.router.routing import select_backends_round_robin
+from immas.router.state import RouterState
 from immas.router.types import PendingChatCompletion, PreparedChatCompletion
 from immas.router.utils import (
     fail_pending_batch,
@@ -56,7 +53,7 @@ def _task_done_callback_factory(
 
 
 async def _process_one_chat_completion(
-    prep: PreparedChatCompletion, *, app: FastAPI
+    prep: PreparedChatCompletion, *, state: RouterState
 ) -> None:
     """
     Process exactly one chat completion request and resolve its Future.
@@ -70,15 +67,6 @@ async def _process_one_chat_completion(
     - log RouterLogRecord
     """
 
-    backends: list[HttpOpenAIBackend] = app.state.backends
-    backend_model_by_id: dict[str, str] = app.state.backend_model_by_id
-
-    predictors: AsyncBackendPredictorPool = app.state.predictors
-    cache: TextPrefixCache = app.state.prefix_cache
-    cache_lock: asyncio.Lock = app.state.prefix_cache_lock
-    load_tracker: AsyncLoadTracker = app.state.load_tracker
-    logger: AsyncJsonlLogger = app.state.logger
-
     pending = prep.pending
 
     try:
@@ -86,10 +74,9 @@ async def _process_one_chat_completion(
         prompt_repr = serialize_chat_messages(messages)
         prompt_chars = len(prompt_repr)
 
-        # Compute prefix matches for each backend using cached texts pre-fetched in the batcher.
         pm_by_backend: dict[str, PrefixMatch] = {}
-        for b in backends:
-            backend_model = backend_model_by_id.get(b.backend_id, "")
+        for b in state.backends:
+            backend_model = state.backend_model_by_id.get(b.backend_id, "")
             if not backend_model:
                 try_set_future_result(
                     pending.future,
@@ -110,9 +97,8 @@ async def _process_one_chat_completion(
                 cached_text=cached_text,
             )
 
-        # Chosen backend is pre-assigned
         backend = prep.assigned_backend
-        backend_model = backend_model_by_id.get(backend.backend_id, "")
+        backend_model = state.backend_model_by_id.get(backend.backend_id, "")
         if not backend_model:
             try_set_future_result(
                 pending.future,
@@ -127,14 +113,12 @@ async def _process_one_chat_completion(
             )
             return
 
-        # Use *effective* model for feature computation / caching / logging.
         effective_model = backend_model
 
-        # Predict for all backends under the router load-tracker context.
-        async with load_tracker.track() as load:
+        async with state.load_tracker.track() as load:
             inputs_by_backend: dict[str, PredictorInput] = {}
-            for b in backends:
-                model = backend_model_by_id[b.backend_id]
+            for b in state.backends:
+                model = state.backend_model_by_id[b.backend_id]
                 pm = pm_by_backend.get(b.backend_id)
                 if pm is None:
                     pm = PrefixMatch(
@@ -153,9 +137,8 @@ async def _process_one_chat_completion(
                     router_rps_1s=float(load.rps),
                 )
 
-            preds_by_backend = await predictors.predict_all(inputs_by_backend)
+            preds_by_backend = await state.predictors.predict_all(inputs_by_backend)
 
-            # Extract chosen backend prediction fields (for backwards-compatible top-level logging).
             chosen_pred = preds_by_backend.get(backend.backend_id, {})
             pred_latency_ms = float(chosen_pred.get("latency_ms", (0.0, 0.0))[0])
             pred_cost_tokens = float(chosen_pred.get("cost_tokens", (0.0, 0.0))[0])
@@ -169,7 +152,6 @@ async def _process_one_chat_completion(
             cached_prompt_chars = int(chosen_pm.cached_chars)
             kvmatch_lcp_chars = int(chosen_pm.lcp_chars)
 
-            # Router-controlled headers to backend (no client auth passthrough).
             backend_headers = {
                 "X-IMMAS-RUN-ID": pending.run_id,
                 "X-IMMAS-DIALOGUE-ID": pending.dialogue_id,
@@ -201,7 +183,6 @@ async def _process_one_chat_completion(
         obs_cached_tokens = usage.cached_tokens
         obs_cache_ratio = usage.cache_ratio
 
-        # Placeholder correctness
         correct = True
         error: Optional[str] = None
 
@@ -212,11 +193,10 @@ async def _process_one_chat_completion(
             obs_cache_ratio=float(obs_cache_ratio),
         )
 
-        # Update predictor + cache only on success (chosen backend only).
         if 200 <= status < 300:
             chosen_inp = inputs_by_backend.get(backend.backend_id)
             if chosen_inp is not None:
-                await predictors.update_one(
+                await state.predictors.update_one(
                     chosen_inp,
                     real_latency_ms=float(obs_latency_ms),
                     real_cost_tokens=int(obs_total_tokens),
@@ -224,22 +204,19 @@ async def _process_one_chat_completion(
                 )
 
             if evict_prefix_cache:
-                # Backend likely did not have the cached prefix (evicted/disabled);
-                # evict router record and skip updating it for this response.
-                async with cache_lock:
-                    cache.evict(
+                async with state.prefix_cache_lock:
+                    state.prefix_cache.evict(
                         backend_id=backend.backend_id,
                         model=effective_model,
                         dialogue_id=pending.dialogue_id,
                     )
             else:
-                # Update router prefix cache using request messages + returned assistant message
                 assistant = extract_first_assistant_message(resp_json)
                 if assistant is not None and isinstance(messages, list):
                     new_messages = list(messages) + [assistant.to_openai_message()]
                     new_prompt_repr = serialize_chat_messages(new_messages)
-                    async with cache_lock:
-                        cache.update(
+                    async with state.prefix_cache_lock:
+                        state.prefix_cache.update(
                             backend_id=backend.backend_id,
                             model=effective_model,
                             dialogue_id=pending.dialogue_id,
@@ -248,9 +225,8 @@ async def _process_one_chat_completion(
         else:
             error = f"backend_status={status}"
 
-        # Build per-backend score list for logging (future auction input).
         backend_scores: list[RouterBackendScore] = []
-        for b in backends:
+        for b in state.backends:
             pm = pm_by_backend.get(b.backend_id) or PrefixMatch(
                 ratio=0.0, lcp_chars=0, prompt_chars=0, cached_chars=0
             )
@@ -259,7 +235,7 @@ async def _process_one_chat_completion(
             backend_scores.append(
                 RouterBackendScore(
                     backend_id=b.backend_id,
-                    model=str(backend_model_by_id.get(b.backend_id, "")),
+                    model=str(state.backend_model_by_id.get(b.backend_id, "")),
                     cached_prompt_chars=int(pm.cached_chars),
                     kvmatch_lcp_chars=int(pm.lcp_chars),
                     kvmatch_text=float(pm.ratio),
@@ -270,7 +246,6 @@ async def _process_one_chat_completion(
                 )
             )
 
-        # For logging, router inflight/rps from the chosen backend's input (same for all).
         chosen_inp_for_log = inputs_by_backend.get(backend.backend_id)
         router_inflight = (
             int(chosen_inp_for_log.router_inflight) if chosen_inp_for_log else 0
@@ -313,7 +288,7 @@ async def _process_one_chat_completion(
             correct=bool(correct),
             error=error,
         )
-        await logger.log(rec)
+        await state.logger.log(rec)
 
         try_set_future_result(pending.future, (int(status), dict(resp_json)))
     except asyncio.CancelledError:
@@ -331,7 +306,7 @@ async def _process_one_chat_completion(
 
 
 async def handle_chat_batch(
-    app: FastAPI,
+    state: RouterState,
     batch: list[PendingChatCompletion],
     info: MicroBatchInfo,
 ) -> None:
@@ -342,24 +317,13 @@ async def handle_chat_batch(
     - choose an assigned backend for each request (current: round-robin)
     - fetch router prefix cache texts for all requests/backends under one lock
     - schedule per-request processing tasks
-
-    This function may raise. The batcher-facing wrapper must ensure that in the
-    event of an exception, all pending futures in `batch` are resolved.
     """
 
     if not batch:
         return
 
-    backends: list[HttpOpenAIBackend] = app.state.backends
-    backend_model_by_id: dict[str, str] = app.state.backend_model_by_id
-    cache: TextPrefixCache = app.state.prefix_cache
-    cache_lock: asyncio.Lock = app.state.prefix_cache_lock
-
-    inflight_tasks: set[asyncio.Task[None]] = app.state.inflight_request_tasks
-
-    assigned = await select_backends_round_robin(app, len(batch))
+    assigned = await select_backends_round_robin(state, len(batch))
     if len(assigned) != len(batch):
-        # Fail all requests if we cannot assign.
         fail_pending_batch(
             batch,
             status_code=503,
@@ -367,22 +331,21 @@ async def handle_chat_batch(
         )
         return
 
-    # Prefetch cached texts for all (request, backend) pairs under one lock.
     cached_by_req: list[dict[str, str | None]] = [{} for _ in batch]
-    async with cache_lock:
+    async with state.prefix_cache_lock:
         for i, pending in enumerate(batch):
-            for b in backends:
-                model = backend_model_by_id.get(b.backend_id, "")
+            for b in state.backends:
+                model = state.backend_model_by_id.get(b.backend_id, "")
                 if not model:
                     cached_by_req[i][b.backend_id] = None
                     continue
-                cached_by_req[i][b.backend_id] = cache.get(
+                cached_by_req[i][b.backend_id] = state.prefix_cache.get(
                     backend_id=b.backend_id,
                     model=model,
                     dialogue_id=pending.dialogue_id,
                 )
 
-    done_cb = _task_done_callback_factory(inflight_tasks)
+    done_cb = _task_done_callback_factory(state.inflight_request_tasks)
 
     for i, pending in enumerate(batch):
         prep = PreparedChatCompletion(
@@ -393,8 +356,8 @@ async def handle_chat_batch(
             batch_size=int(info.batch_size),
         )
         t = asyncio.create_task(
-            _process_one_chat_completion(prep, app=app),
+            _process_one_chat_completion(prep, state=state),
             name=f"chat_completion.batch{info.batch_id}.i{i}",
         )
-        inflight_tasks.add(t)
+        state.inflight_request_tasks.add(t)
         t.add_done_callback(done_cb)

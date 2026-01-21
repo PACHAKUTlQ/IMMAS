@@ -8,12 +8,13 @@ from __future__ import annotations
 
 import asyncio
 
-from fastapi import FastAPI
-
 from immas.router.backend import HttpOpenAIBackend
+from immas.router.state import RouterState
 
 
-async def select_backends_round_robin(app: FastAPI, n: int) -> list[HttpOpenAIBackend]:
+async def select_backends_round_robin(
+    state: RouterState, n: int
+) -> list[HttpOpenAIBackend]:
     """
     Select N backends in a single round-robin critical section.
 
@@ -21,8 +22,8 @@ async def select_backends_round_robin(app: FastAPI, n: int) -> list[HttpOpenAIBa
     deterministic batch ordering.
     """
 
-    backends: list[HttpOpenAIBackend] = app.state.backends
-    rr_lock: asyncio.Lock = app.state.rr_lock
+    backends: list[HttpOpenAIBackend] = state.backends
+    rr_lock: asyncio.Lock = state.rr_lock
 
     if n <= 0:
         return []
@@ -30,8 +31,8 @@ async def select_backends_round_robin(app: FastAPI, n: int) -> list[HttpOpenAIBa
         return []
 
     async with rr_lock:
-        start_idx: int = int(app.state.rr_index)
+        start_idx: int = int(state.rr_index)
         chosen = [backends[(start_idx + i) % len(backends)] for i in range(n)]
-        app.state.rr_index = (start_idx + n) % len(backends)
+        state.rr_index = (start_idx + n) % len(backends)
 
     return chosen

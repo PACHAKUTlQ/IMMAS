@@ -10,19 +10,23 @@ import asyncio
 import logging
 
 from contextlib import asynccontextmanager
+from typing import TYPE_CHECKING
 
 from fastapi import FastAPI
 
 from immas.common.load import AsyncLoadTracker
 from immas.router.backend import HttpOpenAIBackend
 from immas.router.batching import MicroBatchInfo, MicroBatcher
-from immas.router.config import RouterAppConfig
 from immas.router.logger import AsyncJsonlLogger
 from immas.router.predictor import AsyncBackendPredictorPool
 from immas.router.prefix_cache import TextPrefixCache
 from immas.router.processing import handle_chat_batch
+from immas.router.state import RouterState
 from immas.router.types import PendingChatCompletion
 from immas.router.utils import fail_pending_batch
+
+if TYPE_CHECKING:
+    from immas.router.config import RouterAppConfig
 
 
 _log = logging.getLogger(__name__)
@@ -36,15 +40,10 @@ async def lifespan(app: FastAPI, cfg: RouterAppConfig):
     Handles startup and shutdown of resources.
     """
 
-    # Router feature cache (text prefix) - protect with lock.
-    app.state.prefix_cache = TextPrefixCache()
-    app.state.prefix_cache_lock = asyncio.Lock()
-
-    # Router-side load tracker (inflight + RPS).
-    app.state.load_tracker = AsyncLoadTracker(window_s=1.0)
-
-    # Backends registry (ordered list for round-robin).
-    app.state.backends = [
+    prefix_cache = TextPrefixCache()
+    prefix_cache_lock = asyncio.Lock()
+    load_tracker = AsyncLoadTracker(window_s=1.0)
+    backends = [
         HttpOpenAIBackend(
             backend_id=b.backend_id,
             base_url_v1=b.base_url_v1,
@@ -52,28 +51,18 @@ async def lifespan(app: FastAPI, cfg: RouterAppConfig):
         )
         for b in cfg.backends
     ]
-    app.state.backend_model_by_id = {b.backend_id: b.model for b in cfg.backends}
-
-    # Independent predictor per backend.
-    app.state.predictors = AsyncBackendPredictorPool(
+    backend_model_by_id = {b.backend_id: b.model for b in cfg.backends}
+    predictors = AsyncBackendPredictorPool(
         backend_ids=[b.backend_id for b in cfg.backends]
     )
-
-    # Round-robin state.
-    app.state.rr_lock = asyncio.Lock()
-    app.state.rr_index = 0
-
-    # Routing policy string (future: auction, etc.)
-    app.state.routing_policy = cfg.router.routing
-
-    # JSONL logger
-    app.state.logger = AsyncJsonlLogger(
+    rr_lock = asyncio.Lock()
+    rr_index = 0
+    routing_policy = cfg.router.routing
+    logger = AsyncJsonlLogger(
         cfg.router.log_path, append=cfg.router.log_append, flush_every=1
     )
-    await app.state.logger.__aenter__()
-
-    # Track inflight request tasks (so shutdown can cancel/await them).
-    app.state.inflight_request_tasks = set()
+    await logger.__aenter__()
+    inflight_request_tasks: set[asyncio.Task[None]] = set()
 
     # Micro-batcher
     batching_cfg = cfg.router.batching
@@ -93,10 +82,10 @@ async def lifespan(app: FastAPI, cfg: RouterAppConfig):
         MicroBatcher would drop the batch and callers would hang indefinitely.
         """
 
+        router_state: RouterState = app.state.router_state
         try:
-            await handle_chat_batch(app, batch, info)
+            await handle_chat_batch(router_state, batch, info)
         except asyncio.CancelledError:
-            # Let cancellation propagate (shutdown), but do not mask it.
             raise
         except Exception as e:
             _log.exception(
@@ -111,33 +100,45 @@ async def lifespan(app: FastAPI, cfg: RouterAppConfig):
             )
             # Swallow exception so MicroBatcher does not "drop" silently.
 
-    app.state.chat_batcher = MicroBatcher[PendingChatCompletion](
+    chat_batcher = MicroBatcher[PendingChatCompletion](
         max_batch_size=int(batching_cfg.max_batch_size),
         max_wait_ms=float(batching_cfg.max_wait_ms),
         max_queue_size=int(batching_cfg.max_queue_size),
         handler=_batch_handler_safe,
         name="immas.chat_completions.microbatcher",
     )
-    await app.state.chat_batcher.start()
+    await chat_batcher.start()
+
+    state = RouterState(
+        cfg=cfg,
+        backends=backends,
+        backend_model_by_id=backend_model_by_id,
+        predictors=predictors,
+        prefix_cache=prefix_cache,
+        prefix_cache_lock=prefix_cache_lock,
+        chat_batcher=chat_batcher,
+        logger=logger,
+        inflight_request_tasks=inflight_request_tasks,
+        load_tracker=load_tracker,
+        routing_policy=routing_policy,
+        rr_lock=rr_lock,
+        rr_index=rr_index,
+    )
+    app.state.router_state = state
 
     yield
 
-    # Shutdown order matters:
-    # 1) stop accepting new work (batcher)
-    # 2) cancel/await inflight request tasks
-    # 3) close logger
-    # 4) close backends
+    router_state: RouterState = app.state.router_state
+    await router_state.chat_batcher.close()
 
-    batcher: MicroBatcher[PendingChatCompletion] = app.state.chat_batcher
-    await batcher.close()
-
-    inflight: set[asyncio.Task[None]] = app.state.inflight_request_tasks
-    if inflight:
-        for t in list(inflight):
+    if router_state.inflight_request_tasks:
+        for t in list(router_state.inflight_request_tasks):
             t.cancel()
-        await asyncio.gather(*list(inflight), return_exceptions=True)
-        inflight.clear()
+        await asyncio.gather(
+            *list(router_state.inflight_request_tasks), return_exceptions=True
+        )
+        router_state.inflight_request_tasks.clear()
 
-    await app.state.logger.close()
-    for b in app.state.backends:
+    await router_state.logger.close()
+    for b in router_state.backends:
         await b.close()

@@ -8,28 +8,6 @@ A lightweight OpenAI-compatible router that:
 - routes each request (currently: round-robin) and forwards to backends
 - logs + online-trains predictors based on observed outcomes
 - uses backend API keys from its own YAML configuration (no client auth passthrough)
-
-Micro-batching
---------------
-The request handler never forwards directly. It enqueues a PendingRequest and
-awaits a Future. A background `MicroBatcher`:
-- collects up to N requests,
-- waits up to T milliseconds after first request,
-- then schedules per-request processing tasks.
-
-This provides the "request freezing" foundation for later batch-level auction
-routing.
-
-Reliability contract
---------------------
-A key production invariant is:
-
-For every enqueued PendingChatCompletion, its future must eventually be resolved
-(set_result / set_exception / cancel). If a batch handler crashes and the batch
-is "dropped", callers would hang indefinitely.
-
-To enforce this, the batch handler passed into MicroBatcher is wrapped to be
-"never-raise" and to fail all pending futures on unexpected exceptions.
 """
 
 from __future__ import annotations
@@ -44,8 +22,8 @@ from typing import Any
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
-from immas.router.batching import MicroBatcher
 from immas.router.lifecycle import lifespan
+from immas.router.state import RouterState
 from immas.router.types import ChatCompletionResult, PendingChatCompletion
 from immas.router.utils import (
     _get_header,
@@ -77,10 +55,10 @@ def create_app() -> FastAPI:
         Return the union of router-configured backend model names.
         """
 
-        backend_model_by_id: dict[str, str] = req.app.state.backend_model_by_id
+        router_state: RouterState = req.app.state.router_state
         seen: set[str] = set()
         data: list[dict[str, Any]] = []
-        for m in backend_model_by_id.values():
+        for m in router_state.backend_model_by_id.values():
             if m in seen:
                 continue
             seen.add(m)
@@ -94,6 +72,7 @@ def create_app() -> FastAPI:
         Enqueue the request into the micro-batcher and await completion.
         """
 
+        router_state: RouterState = req.app.state.router_state
         run_id = _get_header(req, _HEADER_RUN_ID) or "run_unknown"
         dialogue_id = _get_header(req, _HEADER_DIALOGUE_ID) or "dialogue_unknown"
         turn_number = _parse_turn_number(_get_header(req, _HEADER_TURN_NUMBER))
@@ -124,8 +103,7 @@ def create_app() -> FastAPI:
             future=fut,
         )
 
-        batcher: MicroBatcher[PendingChatCompletion] = req.app.state.chat_batcher
-        ok = batcher.try_submit(pending)
+        ok = router_state.chat_batcher.try_submit(pending)
         if not ok:
             return JSONResponse(
                 status_code=503,
