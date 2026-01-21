@@ -51,6 +51,20 @@ class AsyncLoadTracker:
             t_monotonic=now,
         )
 
+    async def snapshot(self) -> LoadSnapshot:
+        """
+        Get a consistent load snapshot without mutating tracker state.
+
+        Notes
+        -----
+        - This does NOT increment inflight or add a "start" event.
+        - It purges old start timestamps within the lock, so RPS remains stable.
+        """
+
+        async with self._lock:
+            now = time.monotonic()
+            return self._snapshot_locked(now)
+
     @asynccontextmanager
     async def track(self) -> AsyncIterator[LoadSnapshot]:
         async with self._lock:

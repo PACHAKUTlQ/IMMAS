@@ -306,10 +306,9 @@ async def handle_chat_batch(
                 )
 
     # For each request, compute prefix match + predictor inputs and run predictors.
-    # We keep decision-time router load features as currently available (no extra
-    # load tracking in batch handler). These are set to zeros for now.
-    router_inflight_decision = 0
-    router_rps_1s_decision = 0.0
+    load_snap = await state.load_tracker.snapshot()
+    router_inflight_decision = int(load_snap.inflight_requests)
+    router_rps_1s_decision = float(load_snap.rps)
 
     pm_by_req: list[dict[str, PrefixMatch]] = [{} for _ in batch]
     inputs_by_req: list[dict[str, PredictorInput]] = [{} for _ in batch]
