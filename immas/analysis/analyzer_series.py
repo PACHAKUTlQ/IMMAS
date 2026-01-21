@@ -18,7 +18,7 @@ import re
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from immas.analysis.analyzer_types import DialogueSeries
-from immas.analysis.utils import _f, _i
+from immas.analysis.utils import _f, _i, pearsonr
 
 
 def _is_finite(x: float) -> bool:
@@ -44,8 +44,6 @@ def _finite_pairs(
 
 
 def _pearsonr_finite(xs: Sequence[float], ys: Sequence[float]) -> float:
-    from immas.analysis.utils import pearsonr  # local import to keep deps minimal
-
     x2, y2 = _finite_pairs(xs, ys)
     return pearsonr(x2, y2)
 

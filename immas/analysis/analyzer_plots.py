@@ -14,8 +14,9 @@ from __future__ import annotations
 
 import math
 
+from collections import defaultdict
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any, Mapping, Sequence, DefaultDict, List
 
 from immas.analysis.analyzer_bins import _binned_means
 from immas.analysis.analyzer_series import (
@@ -360,9 +361,6 @@ def _write_plots(
     # NOTE: The per-turn profile plot depends on per-turn aggregates constructed in run_analyzer.py.
     # We keep the original behavior by reconstructing those arrays from dialogue_series here.
 
-    from collections import defaultdict
-    from typing import DefaultDict, List
-
     by_turn_cache: DefaultDict[int, List[float]] = defaultdict(list)
     by_turn_kvmatch: DefaultDict[int, List[float]] = defaultdict(list)
     by_turn_latency: DefaultDict[int, List[float]] = defaultdict(list)
@@ -565,5 +563,7 @@ def _write_plots(
     print(f"\nWrote plots to: {outdir.resolve()}")
     if selected:
         print(
-            f"Wrote per-dialogue traces to: {dialogues_dir.resolve()} (n={len(selected)})"
+            f"Wrote per-dialogue traces to: {dialogues_dir.resolve()} (n={
+                len(selected)
+            })"
         )
