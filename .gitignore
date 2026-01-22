@@ -1,9 +1,13 @@
+# Router configuration
+router.yaml
+
 # Datasets
 datasets/
 
 # Trace analysis
-run_analysis
+run_analysis*
 router_run.jsonl
+router_run*
 coqa_run.jsonl
 
 # Byte-compiled / optimized / DLL files
