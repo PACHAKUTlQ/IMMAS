@@ -98,14 +98,17 @@ class MicroBatcher(Generic[T]):
     @property
     def closed(self) -> bool:
         """Whether the batcher is closed (no longer accepting items)."""
+
         return self._closed
 
     def qsize(self) -> int:
         """Current queue size (approximate)."""
+
         return int(self._q.qsize())
 
     async def start(self) -> None:
         """Start the background batching task (idempotent)."""
+
         if self._task is not None:
             return
         self._task = asyncio.create_task(self._run_loop(), name=self._name)
@@ -119,6 +122,7 @@ class MicroBatcher(Generic[T]):
         bool
             True if accepted, False if the batcher is closed or queue is full.
         """
+
         if self._closed:
             return False
         if item is None:
@@ -130,6 +134,7 @@ class MicroBatcher(Generic[T]):
             self._q.put_nowait(item)
         except asyncio.QueueFull:
             return False
+
         return True
 
     async def submit(self, item: T) -> None:
@@ -141,16 +146,19 @@ class MicroBatcher(Generic[T]):
         For router request paths, prefer `try_submit` to avoid adding latency by
         blocking on a full queue. `submit` is provided for completeness/tests.
         """
+
         if self._closed:
             raise RuntimeError("MicroBatcher is closed")
         if item is None:
             raise ValueError(
                 "MicroBatcher does not accept None items (None is reserved)"
             )
+
         await self._q.put(item)
 
     async def close(self) -> None:
         """Stop the batching loop and wait for it to exit (idempotent)."""
+
         if self._closed:
             # If already closed, still wait for task if present.
             if self._task is not None:
