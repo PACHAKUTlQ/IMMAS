@@ -52,6 +52,7 @@ from immas.router.config import RouterAppConfig, load_router_app_config
 from immas.router.logger import AsyncJsonlLogger, RouterBackendScore, RouterLogRecord
 from immas.router.predictor import AsyncBackendPredictorPool, PredictorInput
 from immas.router.prefix_cache import PrefixMatch, TextPrefixCache, match_prefix
+from immas.router.utils import _get_header, _parse_turn_number
 
 
 _HEADER_RUN_ID = "x-immas-run-id"
@@ -63,19 +64,6 @@ _HEADER_SOURCE = "x-immas-source"
 _EVICT_KVMATCH_MIN = 0.8
 _EVICT_OBS_CACHE_MAX = 0.10
 _EVICT_MIN_PROMPT_TOKENS = 64
-
-
-def _get_header(req: Request, name: str) -> str:
-    return (req.headers.get(name) or "").strip()
-
-
-def _parse_turn_number(raw: str) -> int:
-    try:
-        n = int(raw)
-
-        return n if n >= 0 else 0
-    except Exception:
-        return 0
 
 
 def _load_cfg_from_env() -> RouterAppConfig:

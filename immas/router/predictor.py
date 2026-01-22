@@ -35,14 +35,12 @@ from typing import Any, Dict, Iterable, Mapping
 
 from river import compose, preprocessing, tree
 
+from immas.router.utils import _clamp01
+
 
 Features = Dict[str, Any]
 MetricPred = tuple[float, float]
 Predictions = Dict[str, MetricPred]
-
-
-def _clamp01(x: float) -> float:
-    return max(0.0, min(1.0, float(x)))
 
 
 @dataclass(frozen=True, slots=True)

@@ -2,10 +2,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal, Mapping, cast
+from typing import Literal, cast
 
 import yaml
 
+from immas.router.utils import _as_bool, _as_list, _as_mapping, _as_str
 
 RoutingPolicy = Literal["round_robin"]
 
@@ -35,36 +36,6 @@ class RouterAppConfig:
 
     router: RouterConfig
     backends: list[BackendConfig]
-
-
-def _as_mapping(x: Any, *, ctx: str) -> Mapping[str, Any]:
-    if not isinstance(x, Mapping):
-        raise TypeError(f"Expected mapping at {ctx}, got {type(x)!r}")
-
-    return cast(Mapping[str, Any], x)
-
-
-def _as_list(x: Any, *, ctx: str) -> list[Any]:
-    if not isinstance(x, list):
-        raise TypeError(f"Expected list at {ctx}, got {type(x)!r}")
-
-    return x
-
-
-def _as_str(x: Any, *, ctx: str) -> str:
-    if x is None:
-        return ""
-    if not isinstance(x, str):
-        raise TypeError(f"Expected string at {ctx}, got {type(x)!r}")
-
-    return x.strip()
-
-
-def _as_bool(x: Any, *, ctx: str) -> bool:
-    if isinstance(x, bool):
-        return x
-
-    raise TypeError(f"Expected bool at {ctx}, got {type(x)!r}")
 
 
 def load_router_app_config(path: str) -> RouterAppConfig:
