@@ -19,6 +19,17 @@ awaits a Future. A background `MicroBatcher`:
 
 This provides the "request freezing" foundation for later batch-level auction
 routing.
+
+Reliability contract
+--------------------
+A key production invariant is:
+
+For every enqueued PendingChatCompletion, its future must eventually be resolved
+(set_result / set_exception / cancel). If a batch handler crashes and the batch
+is "dropped", callers would hang indefinitely.
+
+To enforce this, the batch handler passed into MicroBatcher is wrapped to be
+"never-raise" and to fail all pending futures on unexpected exceptions.
 """
 
 from __future__ import annotations
@@ -157,12 +168,37 @@ def _try_set_future_result(
 
     This protects against races with cancellation / double completion.
     """
+
     if fut.done():
         return
     try:
         fut.set_result(value)
     except asyncio.InvalidStateError:
         return
+
+
+def _fail_pending_batch(
+    batch: list[PendingChatCompletion],
+    *,
+    status_code: int,
+    message: str,
+) -> None:
+    """
+    Resolve all pending futures in a batch with an error response.
+
+    This is used to enforce the router invariant that once a request is accepted
+    into the micro-batcher, it will eventually be completed.
+
+    Notes
+    -----
+    - Best-effort: ignores already-completed/cancelled futures.
+    - Synchronous (no awaits): safe to call from exception handlers.
+    """
+
+    payload: dict[str, Any] = {"error": {"message": str(message)}}
+
+    for p in batch:
+        _try_set_future_result(p.future, (int(status_code), dict(payload)))
 
 
 async def _select_backends_round_robin(app: FastAPI, n: int) -> list[HttpOpenAIBackend]:
@@ -275,9 +311,7 @@ async def _process_one_chat_completion(
                     500,
                     {
                         "error": {
-                            "message": f"No configured model for backend {
-                                backend.backend_id
-                            }"
+                            "message": f"No configured model for backend {backend.backend_id}"
                         }
                     },
                 ),
@@ -499,8 +533,10 @@ async def _handle_chat_batch(
     - choose an assigned backend for each request (current: round-robin)
     - fetch router prefix cache texts for all requests/backends under one lock
     - schedule per-request processing tasks
-    """
 
+    This function may raise. The batcher-facing wrapper must ensure that in the
+    event of an exception, all pending futures in `batch` are resolved.
+    """
     if not batch:
         return
 
@@ -514,11 +550,11 @@ async def _handle_chat_batch(
     assigned = await _select_backends_round_robin(app, len(batch))
     if len(assigned) != len(batch):
         # Fail all requests if we cannot assign.
-        for p in batch:
-            _try_set_future_result(
-                p.future,
-                (503, {"error": {"message": "No backends available"}}),
-            )
+        _fail_pending_batch(
+            batch,
+            status_code=503,
+            message="No backends available",
+        )
         return
 
     # Prefetch cached texts for all (request, backend) pairs under one lock.
@@ -606,16 +642,39 @@ def create_app() -> FastAPI:
                 "Set router.batching.enabled: true (or remove the key to use defaults)."
             )
 
-        async def _batch_handler(
+        async def _batch_handler_safe(
             batch: list[PendingChatCompletion], info: MicroBatchInfo
         ) -> None:
-            await _handle_chat_batch(app, batch, info)
+            """
+            MicroBatcher-facing wrapper that enforces completion of all batch items.
+
+            This wrapper must never raise (except for cancellation), otherwise the
+            MicroBatcher would drop the batch and callers would hang indefinitely.
+            """
+
+            try:
+                await _handle_chat_batch(app, batch, info)
+            except asyncio.CancelledError:
+                # Let cancellation propagate (shutdown), but do not mask it.
+                raise
+            except Exception as e:
+                _log.exception(
+                    "Batch handler crashed; failing all requests in batch_id=%s size=%s",
+                    info.batch_id,
+                    info.batch_size,
+                )
+                _fail_pending_batch(
+                    batch,
+                    status_code=500,
+                    message=f"Internal router batch error: {type(e).__name__}",
+                )
+                # Swallow exception so MicroBatcher does not "drop" silently.
 
         app.state.chat_batcher = MicroBatcher[PendingChatCompletion](
             max_batch_size=int(batching_cfg.max_batch_size),
             max_wait_ms=float(batching_cfg.max_wait_ms),
             max_queue_size=int(batching_cfg.max_queue_size),
-            handler=_batch_handler,
+            handler=_batch_handler_safe,
             name="immas.chat_completions.microbatcher",
         )
         await app.state.chat_batcher.start()
