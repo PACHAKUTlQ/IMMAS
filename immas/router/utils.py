@@ -56,3 +56,42 @@ def _as_bool(x: Any, *, ctx: str) -> bool:
         return x
 
     raise TypeError(f"Expected bool at {ctx}, got {type(x)!r}")
+
+
+def _as_int(x: Any, *, ctx: str) -> int:
+    if isinstance(x, bool):
+        # bool is a subclass of int; reject it explicitly.
+        raise TypeError(f"Expected int at {ctx}, got bool")
+    if isinstance(x, int):
+        return x
+    if isinstance(x, float):
+        if x.is_integer():
+            return int(x)
+        raise TypeError(f"Expected int at {ctx}, got non-integer float {x}")
+    if isinstance(x, str):
+        s = x.strip()
+        if not s:
+            return 0
+        try:
+            return int(s)
+        except Exception as e:
+            raise TypeError(f"Expected int at {ctx}, got {x!r}") from e
+
+    raise TypeError(f"Expected int at {ctx}, got {type(x)!r}")
+
+
+def _as_float(x: Any, *, ctx: str) -> float:
+    if isinstance(x, bool):
+        raise TypeError(f"Expected float at {ctx}, got bool")
+    if isinstance(x, (int, float)):
+        return float(x)
+    if isinstance(x, str):
+        s = x.strip()
+        if not s:
+            return 0.0
+        try:
+            return float(s)
+        except Exception as e:
+            raise TypeError(f"Expected float at {ctx}, got {x!r}") from e
+
+    raise TypeError(f"Expected float at {ctx}, got {type(x)!r}")
