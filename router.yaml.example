@@ -14,8 +14,6 @@ router:
     quality_scale: 100.0
     latency_scale: 5.0
     cost_scale: 0.02
-    overlap_scale: 10.0
-    congestion_penalty: 0.0
 
 backends:
   - id: b0

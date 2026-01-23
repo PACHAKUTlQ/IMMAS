@@ -6,9 +6,10 @@ Router config file parser
 
 from __future__ import annotations
 
+import os
+
 from dataclasses import dataclass, field
 from pathlib import Path
-import os
 from typing import Literal, cast
 
 import yaml
@@ -62,17 +63,13 @@ class RouterAuctionConfig:
     """
     Auction configuration.
 
-    This is intentionally lightweight and focused on:
-    - welfare weights / scaling
-    - edge thresholding
-    - integer scaling for min-cost max-flow
+    Note: VCG is always computed for matched tasks; it is part of the mechanism.
     """
 
     # Welfare terms (aligned with the reference simulation's structure).
     quality_scale: float = 100.0
     latency_scale: float = 5.0
     cost_scale: float = 0.02
-    overlap_scale: float = 10.0
 
     # Default client preference δ in [0,1].
     delta_default: float = 0.5
@@ -167,9 +164,6 @@ def load_router_app_config(path: str) -> RouterAppConfig:
     cost_scale = _as_float(
         auction_raw.get("cost_scale", 0.02), ctx="router.auction.cost_scale"
     )
-    overlap_scale = _as_float(
-        auction_raw.get("overlap_scale", 10.0), ctx="router.auction.overlap_scale"
-    )
     delta_default = _as_float(
         auction_raw.get("delta_default", 0.5), ctx="router.auction.delta_default"
     )
@@ -247,7 +241,6 @@ def load_router_app_config(path: str) -> RouterAppConfig:
                 quality_scale=float(quality_scale),
                 latency_scale=float(latency_scale),
                 cost_scale=float(cost_scale),
-                overlap_scale=float(overlap_scale),
                 delta_default=float(delta_default),
                 min_welfare_edge=float(min_welfare_edge),
                 mcmf_scale=int(mcmf_scale),

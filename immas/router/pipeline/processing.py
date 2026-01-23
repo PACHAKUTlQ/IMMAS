@@ -14,6 +14,7 @@ from typing import Any, Callable, Optional
 
 from immas.openai.chat import extract_first_assistant_message, serialize_chat_messages
 from immas.openai.usage import parse_usage
+from immas.router.auction.mechanism import AuctionParams, compute_welfare
 from immas.router.components.batching import MicroBatchInfo
 from immas.router.components.logger import RouterBackendScore, RouterLogRecord
 from immas.router.components.predictor import PredictorInput
@@ -95,15 +96,6 @@ async def _process_one_chat_completion(
         )
         return
 
-    kvmatch_text = float(chosen_score.kvmatch_text)
-    cached_prompt_chars = int(chosen_score.cached_prompt_chars)
-    kvmatch_lcp_chars = int(chosen_score.kvmatch_lcp_chars)
-
-    pred_latency_ms = float(chosen_score.pred_latency_ms)
-    pred_cost_tokens = float(chosen_score.pred_cost_tokens)
-    pred_perf_prob = float(chosen_score.pred_perf_prob)
-    pred_cache_ratio = float(chosen_score.pred_cache_ratio)
-
     try:
         messages = pending.body.get("messages")
         prompt_chars = int(prep.prompt_chars)
@@ -118,11 +110,7 @@ async def _process_one_chat_completion(
         forwarded_body: dict[str, Any] = dict(pending.body)
         forwarded_body["model"] = effective_model
 
-        sem = state.backend_semaphores.get(backend.backend_id)
-        if sem is None:
-            # Defensive: should not happen
-            sem = asyncio.Semaphore(1)
-
+        sem = state.backend_semaphores.get(backend.backend_id) or asyncio.Semaphore(1)
         backend_tracker = state.backend_load_trackers.get(backend.backend_id)
 
         t0 = time.monotonic()
@@ -162,7 +150,7 @@ async def _process_one_chat_completion(
         evict_prefix_cache = should_evict_router_prefix_cache(
             usage=usage,
             turn_number=int(pending.turn_number),
-            kvmatch_text=float(kvmatch_text),
+            kvmatch_text=float(chosen_score.kvmatch_text),
             obs_cache_ratio=float(obs_cache_ratio),
         )
 
@@ -218,15 +206,23 @@ async def _process_one_chat_completion(
             dialogue_id=pending.dialogue_id,
             turn_number=int(pending.turn_number),
             prompt_chars=int(prompt_chars),
-            cached_prompt_chars=int(cached_prompt_chars),
-            kvmatch_lcp_chars=int(kvmatch_lcp_chars),
-            kvmatch_text=float(kvmatch_text),
+            cached_prompt_chars=int(chosen_score.cached_prompt_chars),
+            kvmatch_lcp_chars=int(chosen_score.kvmatch_lcp_chars),
+            kvmatch_text=float(chosen_score.kvmatch_text),
             router_inflight=int(router_inflight),
             router_rps_1s=float(router_rps_1s),
-            pred_latency_ms=float(pred_latency_ms),
-            pred_cost_tokens=float(pred_cost_tokens),
-            pred_perf_prob=float(pred_perf_prob),
-            pred_cache_ratio=float(pred_cache_ratio),
+            pred_latency_ms=float(chosen_score.pred_latency_ms),
+            pred_cost_tokens=float(chosen_score.pred_cost_tokens),
+            pred_perf_prob=float(chosen_score.pred_perf_prob),
+            pred_cache_ratio=float(chosen_score.pred_cache_ratio),
+            routing_policy=str(prep.routing_policy),
+            auction_matched=bool(prep.auction_matched),
+            auction_total_welfare=float(prep.auction_total_welfare),
+            chosen_client_valuation=float(prep.chosen_client_valuation),
+            chosen_base_cost=float(prep.chosen_base_cost),
+            chosen_welfare=float(prep.chosen_welfare),
+            vcg_fee=prep.vcg_fee,
+            vcg_total_payment=prep.vcg_total_payment,
             backend_scores=list(prep.backend_scores),
             completion_id=completion_id,
             obs_latency_ms=float(obs_latency_ms),
@@ -300,13 +296,14 @@ async def handle_chat_batch(
         for i, pending in enumerate(batch):
             for b in state.backends:
                 model = state.backend_model_by_id.get(b.backend_id, "")
-                if not model:
-                    cached_text_by_req[i][b.backend_id] = None
-                    continue
-                cached_text_by_req[i][b.backend_id] = state.prefix_cache.get(
-                    backend_id=b.backend_id,
-                    model=model,
-                    dialogue_id=pending.dialogue_id,
+                cached_text_by_req[i][b.backend_id] = (
+                    state.prefix_cache.get(
+                        backend_id=b.backend_id,
+                        model=model,
+                        dialogue_id=pending.dialogue_id,
+                    )
+                    if model
+                    else None
                 )
 
     # Decision-time router load snapshot.
@@ -353,9 +350,19 @@ async def handle_chat_batch(
         return_exceptions=False,
     )
 
-    # Build backend_scores for every request (stable order: state.backends).
-    backend_scores_by_req: list[list[RouterBackendScore]] = [[] for _ in batch]
+    # Auction params for computing per-backend welfare fields in RouterBackendScore.
+    auc_cfg = state.cfg.router.auction
+    auc_params = AuctionParams(
+        quality_scale=float(auc_cfg.quality_scale),
+        latency_scale=float(auc_cfg.latency_scale),
+        cost_scale=float(auc_cfg.cost_scale),
+        delta_default=float(auc_cfg.delta_default),
+        min_welfare_edge=float(auc_cfg.min_welfare_edge),
+        mcmf_scale=int(auc_cfg.mcmf_scale),
+    )
+    delta = float(auc_params.delta_default)
 
+    backend_scores_by_req: list[list[RouterBackendScore]] = [[] for _ in batch]
     for i, pending in enumerate(batch):
         if prompt_repr_by_i[i] is None:
             continue
@@ -368,6 +375,19 @@ async def handle_chat_batch(
                 ratio=0.0, lcp_chars=0, prompt_chars=0, cached_chars=0
             )
             pred = pred_map.get(b.backend_id, {})
+            pred_latency_ms = float(pred.get("latency_ms", (0.0, 0.0))[0])
+            pred_cost_tokens = float(pred.get("cost_tokens", (0.0, 0.0))[0])
+            pred_perf_prob = float(pred.get("performance", (0.0, 0.0))[0])
+            pred_cache_ratio = float(pred.get("cache_ratio", (0.0, 0.0))[0])
+
+            welfare, client_val, base_cost = compute_welfare(
+                delta=float(delta),
+                pred_latency_ms=float(pred_latency_ms),
+                pred_cost_tokens=float(pred_cost_tokens),
+                pred_perf_prob=float(pred_perf_prob),
+                params=auc_params,
+            )
+
             scores.append(
                 RouterBackendScore(
                     backend_id=b.backend_id,
@@ -375,10 +395,13 @@ async def handle_chat_batch(
                     cached_prompt_chars=int(pm.cached_chars),
                     kvmatch_lcp_chars=int(pm.lcp_chars),
                     kvmatch_text=float(pm.ratio),
-                    pred_latency_ms=float(pred.get("latency_ms", (0.0, 0.0))[0]),
-                    pred_cost_tokens=float(pred.get("cost_tokens", (0.0, 0.0))[0]),
-                    pred_perf_prob=float(pred.get("performance", (0.0, 0.0))[0]),
-                    pred_cache_ratio=float(pred.get("cache_ratio", (0.0, 0.0))[0]),
+                    pred_latency_ms=float(pred_latency_ms),
+                    pred_cost_tokens=float(pred_cost_tokens),
+                    pred_perf_prob=float(pred_perf_prob),
+                    pred_cache_ratio=float(pred_cache_ratio),
+                    client_valuation=float(client_val),
+                    base_cost=float(base_cost),
+                    welfare=float(welfare),
                 )
             )
         backend_scores_by_req[i] = scores
@@ -392,13 +415,22 @@ async def handle_chat_batch(
 
     # Choose backends for active requests.
     assigned_by_i: list[Optional[Any]] = [None] * len(batch)
+    auction_matched_by_i: list[bool] = [False] * len(batch)
+    auction_total_welfare = 0.0
+    vcg_fee_by_i: list[Optional[float]] = [None] * len(batch)
+    vcg_pay_by_i: list[Optional[float]] = [None] * len(batch)
 
     if state.routing_policy == "auction":
-        assigned_by_i = await select_backends_auction(
+        dec = await select_backends_auction(
             state,
             active_indices=active_indices,
             backend_scores_by_req=backend_scores_by_req,
         )
+        assigned_by_i = dec.assigned_by_i
+        auction_matched_by_i = dec.auction_matched_by_i
+        auction_total_welfare = float(dec.auction_total_welfare)
+        vcg_fee_by_i = dec.vcg_fee_by_i
+        vcg_pay_by_i = dec.vcg_total_payment_by_i
     else:
         chosen = await select_backends_round_robin(state, len(active_indices))
         for idx, backend in zip(active_indices, chosen):
@@ -459,6 +491,21 @@ async def handle_chat_batch(
             )
             continue
 
+        chosen_score = _find_chosen_backend_score(scores, backend_id=backend.backend_id)
+        if chosen_score is None:
+            try_set_future_result(
+                pending.future,
+                (
+                    500,
+                    {
+                        "error": {
+                            "message": "Internal router error: missing chosen score"
+                        }
+                    },
+                ),
+            )
+            continue
+
         prep = PreparedChatCompletion(
             pending=pending,
             assigned_backend=backend,
@@ -469,7 +516,16 @@ async def handle_chat_batch(
             chosen_predictor_input=chosen_inp,
             batch_id=int(info.batch_id),
             batch_size=int(info.batch_size),
+            routing_policy=str(state.routing_policy),
+            auction_matched=bool(auction_matched_by_i[i]),
+            auction_total_welfare=float(auction_total_welfare),
+            chosen_client_valuation=float(chosen_score.client_valuation),
+            chosen_base_cost=float(chosen_score.base_cost),
+            chosen_welfare=float(chosen_score.welfare),
+            vcg_fee=vcg_fee_by_i[i] if auction_matched_by_i[i] else None,
+            vcg_total_payment=vcg_pay_by_i[i] if auction_matched_by_i[i] else None,
         )
+
         t = asyncio.create_task(
             _process_one_chat_completion(prep, state=state),
             name=f"chat_completion.batch{info.batch_id}.i{i}",

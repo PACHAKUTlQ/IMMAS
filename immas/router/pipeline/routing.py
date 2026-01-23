@@ -8,10 +8,11 @@ from __future__ import annotations
 
 import asyncio
 
+from dataclasses import dataclass
 from typing import Optional
 
 from immas.common.load import LoadSnapshot
-from immas.router.auction.mechanism import AuctionParams, solve_batch_assignment
+from immas.router.auction.mechanism import AuctionParams, run_auction_with_vcg
 from immas.router.components.backend import HttpOpenAIBackend
 from immas.router.components.logger import RouterBackendScore
 from immas.router.state import RouterState
@@ -30,9 +31,7 @@ async def select_backends_round_robin(
     backends: list[HttpOpenAIBackend] = state.backends
     rr_lock: asyncio.Lock = state.rr_lock
 
-    if n <= 0:
-        return []
-    if not backends:
+    if n <= 0 or not backends:
         return []
 
     async with rr_lock:
@@ -43,7 +42,8 @@ async def select_backends_round_robin(
     return chosen
 
 
-def _delta_for_request(*, state: RouterState) -> float:
+@dataclass(frozen=True, slots=True)
+class AuctionDecision:
     """
     Determine δ (quality-vs-latency preference) for a request.
 
@@ -51,8 +51,11 @@ def _delta_for_request(*, state: RouterState) -> float:
     This is the minimal, production-safe choice (paper structure is preserved).
     """
 
-    d = float(state.cfg.router.auction.delta_default)
-    return max(0.0, min(1.0, d))
+    assigned_by_i: list[Optional[HttpOpenAIBackend]]
+    auction_matched_by_i: list[bool]
+    auction_total_welfare: float
+    vcg_fee_by_i: list[Optional[float]]
+    vcg_total_payment_by_i: list[Optional[float]]
 
 
 async def select_backends_auction(
@@ -60,38 +63,35 @@ async def select_backends_auction(
     *,
     active_indices: list[int],
     backend_scores_by_req: list[list[RouterBackendScore]],
-) -> list[Optional[HttpOpenAIBackend]]:
+) -> AuctionDecision:
     """
-    Auction routing: solve a batch assignment maximizing total welfare subject to
-    backend capacities.
+    Run auction allocation + VCG for active requests.
 
-    Parameters
-    ----------
-    active_indices
-        Indices of requests in the batch that are still pending (not failed early).
-    backend_scores_by_req
-        Per-request list of RouterBackendScore, ordered in the same order as
-        state.backends.
-
-    Returns
-    -------
-    list[Optional[HttpOpenAIBackend]]
-        List aligned with the original batch length; None for inactive indices.
+    Unmatched tasks (no positive-welfare edges) are routed via fallback, but have:
+    - auction_matched=False
+    - no VCG payment
     """
-
     n_total = len(backend_scores_by_req)
-    out: list[Optional[HttpOpenAIBackend]] = [None] * n_total
-    if not active_indices:
-        return out
+    assigned: list[Optional[HttpOpenAIBackend]] = [None] * n_total
+    matched: list[bool] = [False] * n_total
+    vcg_fee_by_i: list[Optional[float]] = [None] * n_total
+    vcg_pay_by_i: list[Optional[float]] = [None] * n_total
+
+    if not active_indices or not state.backends:
+        return AuctionDecision(
+            assigned_by_i=assigned,
+            auction_matched_by_i=matched,
+            auction_total_welfare=0.0,
+            vcg_fee_by_i=vcg_fee_by_i,
+            vcg_total_payment_by_i=vcg_pay_by_i,
+        )
 
     backends = state.backends
-    if not backends:
-        return out
 
     backend_ids = [b.backend_id for b in backends]
     n_backends = len(backends)
 
-    # Snapshot per-backend inflight to derive effective capacities and congestion penalties.
+    # Effective capacities: if we have enough "available", use that; otherwise fall back to configured cap.
     async def _snap(bid: str) -> LoadSnapshot:
         tr = state.backend_load_trackers.get(bid)
         if tr is None:
@@ -107,84 +107,66 @@ async def select_backends_auction(
     inflight_by_j = [int(s.inflight_requests) for s in snaps]
 
     cap_cfg_by_j = [
-        int(state.backend_capacity_by_id.get(bid, 1)) for bid in backend_ids
+        max(1, int(state.backend_capacity_by_id.get(bid, 1))) for bid in backend_ids
     ]
-    cap_cfg_by_j = [max(1, c) for c in cap_cfg_by_j]
-
-    # Available capacity now; if too small for the batch, fall back to configured capacity.
     avail_by_j = [max(0, cap_cfg_by_j[j] - inflight_by_j[j]) for j in range(n_backends)]
-    if sum(avail_by_j) >= len(active_indices):
-        capacities = avail_by_j
-    else:
-        capacities = cap_cfg_by_j
+    capacities = avail_by_j if sum(avail_by_j) >= len(active_indices) else cap_cfg_by_j
 
     auc_cfg = state.cfg.router.auction
     params = AuctionParams(
         quality_scale=float(auc_cfg.quality_scale),
         latency_scale=float(auc_cfg.latency_scale),
         cost_scale=float(auc_cfg.cost_scale),
-        overlap_scale=float(auc_cfg.overlap_scale),
+        delta_default=float(auc_cfg.delta_default),
         min_welfare_edge=float(auc_cfg.min_welfare_edge),
         mcmf_scale=int(auc_cfg.mcmf_scale),
     )
-    congestion_penalty = float(auc_cfg.congestion_penalty)
 
-    # Build welfare matrix for active tasks only: shape (N_active x N_backends).
-    delta = _delta_for_request(state=state)
+    # Build welfare/base_cost matrices (active tasks only) from RouterBackendScore
     welfare: list[list[float]] = []
-
+    base_cost: list[list[float]] = []
     for i in active_indices:
         scores = backend_scores_by_req[i]
         if len(scores) != n_backends:
-            # Highly defensive; treat missing as zeros.
-            row = [0.0] * n_backends
-            welfare.append(row)
+            welfare.append([0.0] * n_backends)
+            base_cost.append([0.0] * n_backends)
             continue
+        welfare.append([float(s.welfare) for s in scores])
+        base_cost.append([float(s.base_cost) for s in scores])
 
-        row_w: list[float] = []
-        for j, s in enumerate(scores):
-            w = _compute_welfare_from_score(delta=delta, score=s, params=params)
-
-            # Optional congestion term.
-            if congestion_penalty > 0.0:
-                denom = float(max(1, cap_cfg_by_j[j]))
-                w -= congestion_penalty * (float(inflight_by_j[j]) / denom)
-
-            row_w.append(float(w))
-        welfare.append(row_w)
-
-    assignment_active, _total_w = solve_batch_assignment(
+    result = run_auction_with_vcg(
         welfare=welfare,
+        base_cost=base_cost,
         capacities=capacities,
         params=params,
     )
 
     # Map assignment back to original indices; best-effort fallback if None.
     for k, i in enumerate(active_indices):
-        j = assignment_active[k]
-        if j is None or not (0 <= j < n_backends):
-            # Fallback: choose per-request best welfare backend (ignoring capacity).
-            row = welfare[k]
-            j = max(range(n_backends), key=lambda jj: row[jj])
-        out[i] = backends[int(j)]
+        j = result.assignment[k]
+        if j is not None and 0 <= j < n_backends:
+            assigned[i] = backends[int(j)]
+            matched[i] = True
+            pay = result.payments[k]
+            if pay is not None:
+                vcg_fee_by_i[i] = float(pay.vcg_fee)
+                vcg_pay_by_i[i] = float(pay.total_payment)
 
-    return out
+    # Fallback for unmatched: choose per-request maximum welfare backend (even if <= 0).
+    for i in active_indices:
+        if assigned[i] is not None:
+            continue
+        scores = backend_scores_by_req[i]
+        if not scores:
+            continue
+        j_best = max(range(len(scores)), key=lambda j: float(scores[j].welfare))
+        assigned[i] = backends[int(j_best)]
+        matched[i] = False
 
-
-def _compute_welfare_from_score(
-    *, delta: float, score: RouterBackendScore, params: AuctionParams
-) -> float:
-    """
-    Convert RouterBackendScore fields into the auction's welfare computation.
-    """
-
-    from immas.router.auction.mechanism import compute_welfare
-
-    return compute_welfare(
-        delta=float(delta),
-        pred_latency_ms=float(score.pred_latency_ms),
-        pred_cost_tokens=float(score.pred_cost_tokens),
-        pred_perf_prob=float(score.pred_perf_prob),
-        overlap=float(score.kvmatch_text),
-        params=params,
+    return AuctionDecision(
+        assigned_by_i=assigned,
+        auction_matched_by_i=matched,
+        auction_total_welfare=float(result.total_welfare),
+        vcg_fee_by_i=vcg_fee_by_i,
+        vcg_total_payment_by_i=vcg_pay_by_i,
     )

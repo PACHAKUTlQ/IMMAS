@@ -85,8 +85,7 @@ async def lifespan(app: FastAPI, cfg: RouterAppConfig):
     batching_cfg = cfg.router.batching
     if not batching_cfg.enabled:
         raise RuntimeError(
-            "router.batching.enabled is false, but this router version requires batching. "
-            "Set router.batching.enabled: true (or remove the key to use defaults)."
+            "router.batching.enabled is false, but this router version requires batching."
         )
 
     # Use a local reference that is populated before the batcher starts.

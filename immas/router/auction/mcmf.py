@@ -1,26 +1,22 @@
 """
 immas.router.auction.mcmf
 
-A small, dependency-free min-cost max-flow (MCMF) solver suitable for the router's
-micro-batch sizes.
+A small dependency-free min-cost max-flow solver suitable for router micro-batches.
 
-We implement the successive shortest augmenting path algorithm with Johnson-style
-potentials:
-- Bellman-Ford for initial potentials (handles negative edge costs),
-- Dijkstra on reduced costs for each augmentation.
+Algorithm
+---------
+Successive shortest augmenting path with potentials:
+- Initial potentials via Bellman-Ford (supports negative costs),
+- Each augmentation uses Dijkstra on reduced costs.
 
-This is efficient enough for typical router batch sizes (e.g. 8-128) and a small
-number of backends.
-
-References
-----------
-- Successive shortest augmenting path algorithm for min-cost flow.
+This is stable and fast for typical batch sizes (e.g. <= 128) and small backend counts.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 import heapq
+
+from dataclasses import dataclass
 from typing import List, Tuple
 
 _INF: int = 10**18
@@ -60,20 +56,18 @@ def min_cost_flow(
     n
         Number of nodes.
     edges
-        List of edges as (u, v, cap, cost).
-    s
-        Source node id.
-    t
-        Sink node id.
+        List of edges (u, v, cap, cost).
+    s, t
+        Source and sink node ids.
     max_flow
         Desired flow amount (upper bound). Algorithm may return less if infeasible.
 
     Returns
     -------
-    (flow, cost, graph)
+    (flow, cost, residual_graph)
         flow: achieved flow
-        cost: total min cost of the achieved flow
-        graph: residual graph (can be inspected to extract the matching)
+        cost: total min cost
+        residual_graph: residual network (for extracting matching)
     """
 
     if n <= 0:
@@ -81,12 +75,13 @@ def min_cost_flow(
     if not (0 <= s < n and 0 <= t < n):
         raise ValueError("Invalid source/sink node ids")
     if max_flow <= 0:
-        g: List[List[_Edge]] = [[] for _ in range(n)]
+        g0: List[List[_Edge]] = [[] for _ in range(n)]
         for u, v, cap, cost in edges:
-            _add_edge(g, u, v, cap, cost)
-        return 0, 0, g
+            if cap > 0:
+                _add_edge(g0, u, v, cap, cost)
+        return 0, 0, g0
 
-    g = [[] for _ in range(n)]
+    g: List[List[_Edge]] = [[] for _ in range(n)]
     for u, v, cap, cost in edges:
         if cap <= 0:
             continue
