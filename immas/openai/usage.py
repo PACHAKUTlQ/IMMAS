@@ -10,6 +10,12 @@ We support:
 - Responses/Realtimes style:
   usage.input_tokens, usage.output_tokens, usage.total_tokens
   usage.input_token_details.cached_tokens
+
+Notes
+-----
+Some backends do not report cached-token accounting at all. In that case, we
+still return cached_tokens=0 but mark cached_tokens_known=False so callers can
+avoid drawing incorrect conclusions (e.g., false "eviction detected").
 """
 
 from __future__ import annotations
@@ -31,10 +37,21 @@ def _get_mapping(x: Any) -> Mapping[str, Any] | None:
 
 @dataclass(frozen=True, slots=True)
 class ParsedUsage:
+    """
+    Parsed usage fields with best-effort compatibility.
+
+    Attributes
+    ----------
+    cached_tokens_known
+        True if the backend explicitly reported some cached-token accounting field,
+        even if the value is zero. False means "unknown/unreported", not "zero".
+    """
+
     prompt_tokens: int
     completion_tokens: int
     total_tokens: int
     cached_tokens: int
+    cached_tokens_known: bool
 
     @property
     def cache_ratio(self) -> float:
@@ -46,14 +63,22 @@ class ParsedUsage:
 
 def parse_usage(resp_json: Any) -> ParsedUsage:
     """
-    Best-effort usage parser. Missing fields become 0.
+    Best-effort usage parser.
+
+    Missing fields become zero, but `cached_tokens_known` will be False unless the
+    backend explicitly reports a cached-token field.
     """
+
     usage = _get_mapping(
         resp_json.get("usage") if isinstance(resp_json, Mapping) else None
     )
     if usage is None:
         return ParsedUsage(
-            prompt_tokens=0, completion_tokens=0, total_tokens=0, cached_tokens=0
+            prompt_tokens=0,
+            completion_tokens=0,
+            total_tokens=0,
+            cached_tokens=0,
+            cached_tokens_known=False,
         )
 
     # Chat Completions names
@@ -70,24 +95,19 @@ def parse_usage(resp_json: Any) -> ParsedUsage:
         total_tokens = prompt_tokens + completion_tokens
 
     cached_tokens = 0
+    cached_tokens_known = False
 
     # Chat Completions: prompt_tokens_details.cached_tokens
     ptd = _get_mapping(usage.get("prompt_tokens_details"))
-    if ptd is not None:
+    if ptd is not None and "cached_tokens" in ptd:
+        cached_tokens_known = True
         cached_tokens = max(cached_tokens, _int(ptd.get("cached_tokens")))
 
     # Responses/Realtimes: input_token_details.cached_tokens
     itd = _get_mapping(usage.get("input_token_details"))
-    if itd is not None:
+    if itd is not None and "cached_tokens" in itd:
+        cached_tokens_known = True
         cached_tokens = max(cached_tokens, _int(itd.get("cached_tokens")))
-
-        # Sometimes nested cached_tokens_details.text_tokens exists
-        ctd = _get_mapping(itd.get("cached_tokens_details"))
-        if ctd is not None:
-            cached_tokens = max(cached_tokens, _int(ctd.get("text_tokens")))
-
-    # Some backends may put cached_tokens at top-level usage (rare)
-    cached_tokens = max(cached_tokens, _int(usage.get("cached_tokens")))
 
     # Clamp to something sane
     cached_tokens = max(
@@ -99,4 +119,5 @@ def parse_usage(resp_json: Any) -> ParsedUsage:
         completion_tokens=completion_tokens,
         total_tokens=total_tokens,
         cached_tokens=cached_tokens,
+        cached_tokens_known=cached_tokens_known,
     )

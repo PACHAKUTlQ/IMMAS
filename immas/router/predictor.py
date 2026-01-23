@@ -1,12 +1,20 @@
 """
 immas.router.predictor
 
-Online predictor for latency/cost/performance plus a cache-reuse calibrator.
+Online predictor for latency/cost/performance.
 
-Important:
-- We never use observed cached_tokens as a prediction-time feature.
-- We *do* train a cache-ratio model using observed cached_tokens as labels.
-- Latency/cost models receive the *predicted* cache ratio as an input feature.
+Rationale:
+- At routing time, the router already computes an extremely strong proxy for
+  prefix reuse: `kvmatch_text`, derived from deterministic text prefix matching.
+- Training a multi-feature cache ratio model can add avoidable noise and can
+  degrade latency/cost predictions.
+
+We deterministically set:
+    pred_cache_ratio := clamp(kvmatch_text, 0, 1)
+
+and provide it both:
+- as a logged prediction output ("cache_ratio"), and
+- as an input feature ("pred_cache_ratio") to latency/cost/perf models.
 
 Multi-backend
 ------------
@@ -23,6 +31,10 @@ from river import compose, preprocessing, tree
 
 Features = Dict[str, Any]
 MetricPred = Tuple[float, float]
+
+
+def _clamp01(x: float) -> float:
+    return max(0.0, min(1.0, float(x)))
 
 
 @dataclass(frozen=True, slots=True)
@@ -53,16 +65,12 @@ class AgentPredictor:
     - latency_ms (router E2E for now)
     - cost_tokens (total tokens)
     - performance_prob (placeholder)
-    - cache_ratio (calibrator target: cached_tokens / prompt_tokens)
+
+    Cache ratio:
+    - derived deterministically from kvmatch_text.
     """
 
     def __init__(self) -> None:
-        enc = preprocessing.OneHotEncoder()
-
-        self.model_cache_ratio = compose.Pipeline(
-            enc,
-            tree.HoeffdingTreeRegressor(),
-        )
         self.model_latency = compose.Pipeline(
             preprocessing.OneHotEncoder(),
             tree.HoeffdingTreeRegressor(),
@@ -89,15 +97,16 @@ class AgentPredictor:
             "router_rps_1s": float(inp.router_rps_1s),
         }
 
-    def _predict_cache_ratio(self, x_base: Features) -> float:
-        v = self.model_cache_ratio.predict_one(x_base)
-        r = float(v) if v is not None else 0.0
+    def _pred_cache_ratio(self, inp: PredictorInput) -> float:
+        """
+        Deterministic cache-ratio "prediction" from router-known text prefix match.
+        """
 
-        return max(0.0, min(1.0, r))
+        return _clamp01(inp.kvmatch_text)
 
     def predict(self, inp: PredictorInput) -> Dict[str, MetricPred]:
         x_base = self._base_features(inp)
-        pred_cache_ratio = self._predict_cache_ratio(x_base)
+        pred_cache_ratio = self._pred_cache_ratio(inp)
         x = {**x_base, "pred_cache_ratio": float(pred_cache_ratio)}
 
         lat = self.model_latency.predict_one(x)
@@ -108,7 +117,7 @@ class AgentPredictor:
 
         proba = self.model_perf.predict_proba_one(x)
         perf_f = float(proba.get(True, 0.0)) if isinstance(proba, Mapping) else 0.0
-        perf_f = max(0.0, min(1.0, perf_f))
+        perf_f = _clamp01(perf_f)
 
         dummy_std = 0.0
 
@@ -116,6 +125,7 @@ class AgentPredictor:
             "latency_ms": (lat_f, dummy_std),
             "cost_tokens": (cost_f, dummy_std),
             "performance": (perf_f, dummy_std),
+            # For logging and analysis
             "cache_ratio": (float(pred_cache_ratio), dummy_std),
         }
 
@@ -126,18 +136,20 @@ class AgentPredictor:
         real_latency_ms: float,
         real_cost_tokens: int,
         real_perf_correct: bool,
-        real_cache_ratio: float | None,
     ) -> None:
-        # Use cache ratio prediction as an input to other models (no leakage).
+        """
+        Online update for latency/cost/perf models.
+
+        Notes
+        -----
+        We include `pred_cache_ratio` as an input feature, but it is computed
+        deterministically from kvmatch_text.
+        """
+
         x_base = self._base_features(inp)
-        pred_cache_ratio = self._predict_cache_ratio(x_base)
+        pred_cache_ratio = self._pred_cache_ratio(inp)
         x = {**x_base, "pred_cache_ratio": float(pred_cache_ratio)}
 
         self.model_latency.learn_one(x, float(real_latency_ms))
         self.model_cost.learn_one(x, float(real_cost_tokens))
         self.model_perf.learn_one(x, bool(real_perf_correct))
-
-        # Train cache calibrator from router-known features only.
-        if real_cache_ratio is not None:
-            y = max(0.0, min(1.0, float(real_cache_ratio)))
-            self.model_cache_ratio.learn_one(x_base, y)
