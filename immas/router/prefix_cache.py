@@ -38,6 +38,32 @@ def common_prefix_length(a: str, b: str) -> int:
     return i
 
 
+def match_prefix(*, prompt_text: str, cached_text: Optional[str]) -> PrefixMatch:
+    """Computes prefix match statistics given a prompt and cached text."""
+
+    prompt_chars = len(prompt_text)
+    cached_chars = len(cached_text) if cached_text is not None else 0
+
+    if prompt_chars <= 0 or not cached_text:
+        return PrefixMatch(
+            ratio=0.0,
+            lcp_chars=0,
+            prompt_chars=prompt_chars,
+            cached_chars=cached_chars,
+        )
+
+    lcp = common_prefix_length(cached_text, prompt_text)
+    ratio = float(lcp) / float(prompt_chars)
+    ratio = max(0.0, min(1.0, ratio))
+
+    return PrefixMatch(
+        ratio=ratio,
+        lcp_chars=int(lcp),
+        prompt_chars=int(prompt_chars),
+        cached_chars=int(cached_chars),
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class PrefixMatch:
     """Detailed prefix match statistics for one prompt."""
@@ -82,7 +108,7 @@ class TextPrefixCache:
             return True
         return False
 
-    def match(
+    def get_and_match(
         self, *, backend_id: str, model: str, dialogue_id: str, prompt_text: str
     ) -> PrefixMatch:
         """
@@ -95,37 +121,6 @@ class TextPrefixCache:
           in which case the best-case lcp equals cached_chars.
         """
 
-        prompt_chars = len(prompt_text)
         cached = self.get(backend_id=backend_id, model=model, dialogue_id=dialogue_id)
-        cached_chars = len(cached) if cached is not None else 0
 
-        if prompt_chars <= 0 or not cached:
-            return PrefixMatch(
-                ratio=0.0,
-                lcp_chars=0,
-                prompt_chars=prompt_chars,
-                cached_chars=cached_chars,
-            )
-
-        lcp = common_prefix_length(cached, prompt_text)
-        ratio = float(lcp) / float(prompt_chars)
-        ratio = max(0.0, min(1.0, ratio))
-
-        return PrefixMatch(
-            ratio=ratio,
-            lcp_chars=int(lcp),
-            prompt_chars=int(prompt_chars),
-            cached_chars=int(cached_chars),
-        )
-
-    def match_ratio(
-        self, *, backend_id: str, model: str, dialogue_id: str, prompt_text: str
-    ) -> float:
-        """Backward-compatible convenience wrapper returning only the ratio."""
-
-        return self.match(
-            backend_id=backend_id,
-            model=model,
-            dialogue_id=dialogue_id,
-            prompt_text=prompt_text,
-        ).ratio
+        return match_prefix(prompt_text=prompt_text, cached_text=cached)

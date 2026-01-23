@@ -14,7 +14,6 @@ dependencies = [
   "river>=0.23.0",
   "tqdm>=4.67.0",
   "uvicorn[standard]>=0.40.0",
-  "vllm>=0.13.0",
 ]
 
 [tool.uv]
