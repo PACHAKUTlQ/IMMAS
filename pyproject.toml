@@ -9,6 +9,7 @@ dependencies = [
   "fastapi>=0.128.0",
   "httpx>=0.28.0",
   "matplotlib>=3.10.8",
+  "networkx>=3.6.1",
   "numpy>=2.2.0",
   "openai>=2.15.0",
   "river>=0.23.0",
