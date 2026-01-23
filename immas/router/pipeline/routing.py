@@ -71,6 +71,7 @@ async def select_backends_auction(
     - auction_matched=False
     - no VCG payment
     """
+
     n_total = len(backend_scores_by_req)
     assigned: list[Optional[HttpOpenAIBackend]] = [None] * n_total
     matched: list[bool] = [False] * n_total

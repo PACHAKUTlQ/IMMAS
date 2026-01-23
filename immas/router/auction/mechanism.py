@@ -35,6 +35,10 @@ from typing import List, Optional, Sequence, Tuple
 from immas.router.auction.mcmf import min_cost_flow
 
 
+def _clamp01(x: float) -> float:
+    return max(0.0, min(1.0, float(x)))
+
+
 @dataclass(frozen=True, slots=True)
 class AuctionParams:
     """
@@ -92,10 +96,6 @@ class AuctionResult:
     payments: List[Optional[VCGPayment]]
 
 
-def _clamp01(x: float) -> float:
-    return max(0.0, min(1.0, float(x)))
-
-
 def compute_client_valuation(
     *,
     delta: float,
@@ -108,12 +108,14 @@ def compute_client_valuation(
 
     L is treated as seconds (as in the reference code).
     """
+
     d = _clamp01(delta)
     L_s = max(0.0, float(pred_latency_ms)) / 1000.0
     P = _clamp01(pred_perf_prob)
 
     val_quality = float(params.quality_scale) * P
     val_latency = float(params.latency_scale) * L_s
+
     return float(d * val_quality - (1.0 - d) * val_latency)
 
 
@@ -123,7 +125,9 @@ def compute_scaled_base_cost(
     """
     Convert predicted token-cost proxy into the same unit used by welfare/payments.
     """
+
     c = max(0.0, float(pred_cost_tokens))
+
     return float(float(params.cost_scale) * c)
 
 
@@ -138,6 +142,7 @@ def compute_welfare(
     """
     Compute (welfare, client_valuation, base_cost) for a (task, backend) pair.
     """
+
     val = compute_client_valuation(
         delta=float(delta),
         pred_latency_ms=float(pred_latency_ms),
@@ -149,6 +154,7 @@ def compute_welfare(
         params=params,
     )
     welfare = float(val - base_cost)
+
     return welfare, val, base_cost
 
 
@@ -229,6 +235,7 @@ def solve_allocation_mcmf(
 
     total_welfare = -float(total_cost) / float(scale)
     _ = flow
+
     return assignment, float(total_welfare)
 
 
@@ -244,6 +251,7 @@ def run_auction_with_vcg(
 
     VCG is computed for matched tasks only, consistent with the reference code.
     """
+
     n_tasks = len(welfare)
     if n_tasks == 0:
         return AuctionResult(assignment=[], total_welfare=0.0, payments=[])
