@@ -19,6 +19,14 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Sequence, Tuple
 
 
+def _clamp01(x: float) -> float:
+    return max(0.0, min(1.0, float(x)))
+
+
+def _is_finite(x: float) -> bool:
+    return not (math.isnan(x) or math.isinf(x))
+
+
 def mean(xs: Sequence[float]) -> float:
     return float(sum(xs) / len(xs)) if xs else 0.0
 
@@ -229,3 +237,26 @@ def _write_turns_csv(*, out_path: Path, records: Sequence[Mapping[str, Any]]) ->
         for r in records:
             row = {c: _csv_fmt(r.get(c)) for c in cols}
             w.writerow(row)
+
+
+def _finite_pairs(
+    xs: Sequence[float], ys: Sequence[float]
+) -> Tuple[List[float], List[float]]:
+    """
+    Filter (x, y) pairs where both are finite, preserving alignment.
+    """
+
+    out_x: List[float] = []
+    out_y: List[float] = []
+    for x, y in zip(xs, ys):
+        xf = float(x)
+        yf = float(y)
+        if _is_finite(xf) and _is_finite(yf):
+            out_x.append(xf)
+            out_y.append(yf)
+    return out_x, out_y
+
+
+def _pearsonr_finite(xs: Sequence[float], ys: Sequence[float]) -> float:
+    x2, y2 = _finite_pairs(xs, ys)
+    return pearsonr(x2, y2)

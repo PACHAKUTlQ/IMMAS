@@ -15,39 +15,10 @@ import hashlib
 import math
 import re
 
-from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Sequence
 
 from immas.analysis.analyzer_types import DialogueSeries
-from immas.analysis.utils import _f, _i
-
-
-def _is_finite(x: float) -> bool:
-    return not (math.isnan(x) or math.isinf(x))
-
-
-def _finite_pairs(
-    xs: Sequence[float], ys: Sequence[float]
-) -> Tuple[List[float], List[float]]:
-    """
-    Filter (x, y) pairs where both are finite, preserving alignment.
-    """
-
-    out_x: List[float] = []
-    out_y: List[float] = []
-    for x, y in zip(xs, ys):
-        xf = float(x)
-        yf = float(y)
-        if _is_finite(xf) and _is_finite(yf):
-            out_x.append(xf)
-            out_y.append(yf)
-    return out_x, out_y
-
-
-def _pearsonr_finite(xs: Sequence[float], ys: Sequence[float]) -> float:
-    from immas.analysis.utils import pearsonr  # local import to keep deps minimal
-
-    x2, y2 = _finite_pairs(xs, ys)
-    return pearsonr(x2, y2)
+from immas.analysis.utils import _f, _i, _s
 
 
 def _safe_float_series(records: Sequence[Mapping[str, Any]], key: str) -> List[float]:
@@ -142,11 +113,18 @@ def _build_dialogue_series(
     return DialogueSeries(
         dialogue_id=dialogue_id,
         turns=turns,
+        backend_id=[_s(r.get("backend_id")) for r in per_turn],
+        model=[_s(r.get("model")) for r in per_turn],
+        source=[_s(r.get("source")) for r in per_turn],
         obs_latency_ms=[_f(r.get("obs_latency_ms"), math.nan) for r in per_turn],
         pred_latency_ms=[_f(r.get("pred_latency_ms"), math.nan) for r in per_turn],
         obs_cache_ratio=[_f(r.get("obs_cache_ratio"), math.nan) for r in per_turn],
         pred_cache_ratio=[_f(r.get("pred_cache_ratio"), math.nan) for r in per_turn],
         kvmatch_text=[_f(r.get("kvmatch_text"), math.nan) for r in per_turn],
+        pred_cost_tokens=[_f(r.get("pred_cost_tokens"), math.nan) for r in per_turn],
+        obs_total_tokens=[_i(r.get("obs_total_tokens")) for r in per_turn],
+        pred_perf_prob=[_f(r.get("pred_perf_prob"), math.nan) for r in per_turn],
+        correct=[bool(r.get("correct", True)) for r in per_turn],
         obs_prompt_tokens=[_i(r.get("obs_prompt_tokens")) for r in per_turn],
         obs_cached_tokens=[_i(r.get("obs_cached_tokens")) for r in per_turn],
         prompt_chars=[_i(r.get("prompt_chars")) for r in per_turn],

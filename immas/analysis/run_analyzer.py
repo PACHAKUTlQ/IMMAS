@@ -8,8 +8,6 @@ This file now focuses on:
 - computing summary metrics
 - producing CSV artifacts
 - calling outlier reporting and plotting modules
-
-The core logic is unchanged; code was moved into submodules for maintainability.
 """
 
 from __future__ import annotations
@@ -25,22 +23,25 @@ from immas.analysis.analyzer_aggregates import (
     _compute_per_turn_aggregates,
     _print_per_turn_aggregates,
 )
+from immas.analysis.analyzer_metrics import (
+    compute_binary_prob_metrics,
+    extract_perf_pairs_from_records,
+)
 from immas.analysis.analyzer_outliers import (
     _find_inconsistent_usage_cases,
-    _find_suspicious_kv_cases,
     _print_inconsistent_usage_cases,
     _print_residual_outliers,
-    _print_suspicious_kv_cases,
     _print_top_latency_outliers,
     _print_turn_number_gaps,
     _top_latency_outliers,
     _turn_number_gaps,
 )
 from immas.analysis.analyzer_plots import _write_plots
-from immas.analysis.analyzer_reports import _write_dialogue_summary_csv
+from immas.analysis.analyzer_reports import (
+    _write_backend_summary_csv,
+    _write_dialogue_summary_csv,
+)
 from immas.analysis.analyzer_series import (
-    _is_finite,
-    _pearsonr_finite,
     _safe_float_series,
     _safe_int_series,
     _build_dialogue_series,
@@ -59,7 +60,39 @@ from immas.analysis.utils import (
     _s,
     _pairs,
     _write_turns_csv,
+    _is_finite,
+    _pearsonr_finite,
 )
+
+
+def _print_backend_usage(ok_by_end: List[Mapping[str, Any]]) -> None:
+    """
+    Print backend usage summary.
+
+    This answers "which backend is used" at a glance, including model/base_url context.
+    """
+    by_backend: dict[str, list[Mapping[str, Any]]] = {}
+    for r in ok_by_end:
+        bid = _s(r.get("backend_id")) or "backend_unknown"
+        by_backend.setdefault(bid, []).append(r)
+
+    total = sum(len(v) for v in by_backend.values())
+    if total <= 0:
+        return
+
+    print("\nBackend usage")
+    print("-------------")
+    for bid in sorted(by_backend.keys()):
+        rs = by_backend[bid]
+        n = len(rs)
+        frac = float(n) / float(total)
+        model = _s(rs[0].get("model")) if rs else ""
+        base_url = _s(rs[0].get("backend_base_url_v1")) if rs else ""
+        print(
+            f"{bid:>16}  n={n:>5}  frac={frac:>6.2%}  model={model}  base_url={
+                base_url
+            }"
+        )
 
 
 def main() -> None:
@@ -113,15 +146,20 @@ def main() -> None:
     # Completion-order time series (for model evolution / load effects)
     ok_by_end = sorted(ok, key=lambda r: _f(r.get("t_end_monotonic")))
 
+    _print_backend_usage(ok_by_end)
+
     # Pairwise metrics (skips missing/unparseable)
     pred_lat, obs_lat = _pairs(ok_by_end, "pred_latency_ms", "obs_latency_ms")
     pred_cost, obs_cost = _pairs(ok_by_end, "pred_cost_tokens", "obs_total_tokens")
     pred_cache, obs_cache = _pairs(ok_by_end, "pred_cache_ratio", "obs_cache_ratio")
-    kvmatch, obs_cache2 = _pairs(ok_by_end, "kvmatch_text", "obs_cache_ratio")
+
+    # Performance pairs (probability vs label)
+    pred_perf, obs_correct_bool = extract_perf_pairs_from_records(
+        [dict(r) for r in ok_by_end]
+    )
 
     # Plot-friendly series (NaN for missing)
     obs_cache_ratio_all = _safe_float_series(ok_by_end, "obs_cache_ratio")
-
     obs_prompt_tokens_all = _safe_int_series(ok_by_end, "obs_prompt_tokens")
     obs_cached_tokens_all = _safe_int_series(ok_by_end, "obs_cached_tokens")
 
@@ -131,15 +169,15 @@ def main() -> None:
     obs_lat_finite = [x for x in obs_lat if _is_finite(x)]
     obs_cost_finite = [x for x in obs_cost if _is_finite(x)]
 
-    print("\nPrediction accuracy / regression metrics")
-    print("---------------------------------------")
-    print(f"Accuracy(correct):    {acc:.4f}")
+    print("\nPredictor outputs: accuracy / regression / calibration")
+    print("------------------------------------------------------")
+    print(f"Observed accuracy(correct):        {acc:.4f}")
 
-    print(f"Latency pairs:        n={len(obs_lat)}")
-    print(f"Latency MAE (ms):     {mae(pred_lat, obs_lat):.2f}")
-    print(f"Latency RMSE (ms):    {rmse(pred_lat, obs_lat):.2f}")
-    print(f"Latency corr:         {pearsonr(pred_lat, obs_lat):.3f}")
-    print(f"Latency R^2:          {r2_score(pred_lat, obs_lat):.3f}")
+    print(f"\nLatency pairs:                     n={len(obs_lat)}")
+    print(f"Latency MAE (ms):                  {mae(pred_lat, obs_lat):.2f}")
+    print(f"Latency RMSE (ms):                 {rmse(pred_lat, obs_lat):.2f}")
+    print(f"Latency corr:                      {pearsonr(pred_lat, obs_lat):.3f}")
+    print(f"Latency R^2:                       {r2_score(pred_lat, obs_lat):.3f}")
     if obs_lat_finite:
         print(
             "Latency quantiles (ms): "
@@ -148,11 +186,11 @@ def main() -> None:
             f"p99={quantile(obs_lat_finite, 0.99):.1f}"
         )
 
-    print(f"\nCost pairs:           n={len(obs_cost)}")
-    print(f"Cost MAE (tok):       {mae(pred_cost, obs_cost):.2f}")
-    print(f"Cost RMSE (tok):      {rmse(pred_cost, obs_cost):.2f}")
-    print(f"Cost corr:            {pearsonr(pred_cost, obs_cost):.3f}")
-    print(f"Cost R^2:             {r2_score(pred_cost, obs_cost):.3f}")
+    print(f"\nCost pairs:                        n={len(obs_cost)}")
+    print(f"Cost MAE (tok):                    {mae(pred_cost, obs_cost):.2f}")
+    print(f"Cost RMSE (tok):                   {rmse(pred_cost, obs_cost):.2f}")
+    print(f"Cost corr:                         {pearsonr(pred_cost, obs_cost):.3f}")
+    print(f"Cost R^2:                          {r2_score(pred_cost, obs_cost):.3f}")
     if obs_cost_finite:
         print(
             "Cost quantiles (tok): "
@@ -161,18 +199,21 @@ def main() -> None:
             f"p99={quantile(obs_cost_finite, 0.99):.1f}"
         )
 
-    print("\nKV cache / prefix reuse")
-    print("-----------------------")
+    # Cache reuse summary (no mismatch deep-dive)
+    print("\nCache reuse (observed) + router proxy (pred_cache_ratio)")
+    print("--------------------------------------------------------")
     print(
-        f"Mean obs_prompt_tokens:  {mean([float(x) for x in obs_prompt_tokens_all]):.1f}"
+        f"Mean obs_prompt_tokens:            {
+            mean([float(x) for x in obs_prompt_tokens_all]):.1f}"
     )
     print(
-        f"Mean obs_cached_tokens:  {mean([float(x) for x in obs_cached_tokens_all]):.1f}"
+        f"Mean obs_cached_tokens:            {
+            mean([float(x) for x in obs_cached_tokens_all]):.1f}"
     )
 
     obs_cr_finite = [x for x in obs_cache_ratio_all if _is_finite(x)]
     if obs_cr_finite:
-        print(f"Mean obs_cache_ratio:    {mean(obs_cr_finite):.3f}")
+        print(f"Mean obs_cache_ratio:              {mean(obs_cr_finite):.3f}")
         print(
             "obs_cache_ratio quantiles: "
             f"p50={quantile(obs_cr_finite, 0.50):.3f}  "
@@ -180,20 +221,26 @@ def main() -> None:
             f"p99={quantile(obs_cr_finite, 0.99):.3f}"
         )
     else:
-        print("Mean obs_cache_ratio:    0.000")
+        print("Mean obs_cache_ratio:              0.000")
 
-    if pred_cache and obs_cache:
-        print(f"CacheRatio pairs:        n={len(obs_cache)}")
-        print(f"CacheRatio MAE:          {mae(pred_cache, obs_cache):.3f}")
-        print(f"CacheRatio RMSE:         {rmse(pred_cache, obs_cache):.3f}")
-        print(f"CacheRatio corr:         {pearsonr(pred_cache, obs_cache):.3f}")
-        print(f"CacheRatio R^2:          {r2_score(pred_cache, obs_cache):.3f}")
-    if kvmatch and obs_cache2:
-        print(f"kvmatch_text corr(obs):  {pearsonr(kvmatch, obs_cache2):.3f}")
+    pred_cr_finite = [x for x in pred_cache if _is_finite(x)]
+    if pred_cr_finite:
+        print(f"Mean pred_cache_ratio (proxy):     {mean(pred_cr_finite):.3f}")
+
+    # Performance probability metrics
+    perf_metrics = compute_binary_prob_metrics(pred_perf, obs_correct_bool)
+    print("\nPerformance probability (pred_perf_prob)")
+    print("---------------------------------------")
+    print(f"Pairs:                             n={perf_metrics.n}")
+    print(f"Mean pred_perf_prob:               {perf_metrics.mean_pred:.3f}")
+    print(f"Mean observed correct rate:        {perf_metrics.mean_obs:.3f}")
+    print(f"Accuracy at threshold 0.5:         {perf_metrics.accuracy_at_0_5:.3f}")
+    print(f"Brier score:                       {perf_metrics.brier:.4f}")
+    print(f"Log loss:                          {perf_metrics.log_loss:.4f}")
 
     obs_lat_all_plot = _safe_float_series(ok_by_end, "obs_latency_ms")
     cache_lat_corr = _pearsonr_finite(obs_cache_ratio_all, obs_lat_all_plot)
-    print(f"\nObs corr(cache_ratio, latency): {cache_lat_corr:.3f}")
+    print(f"\nObs corr(obs_cache_ratio, latency): {cache_lat_corr:.3f}")
 
     # Conversation-ordered debug CSV
     outdir = Path(args.outdir)
@@ -227,9 +274,6 @@ def main() -> None:
 
     _print_residual_outliers(ok_by_end, topk=topk)
 
-    suspicious = _find_suspicious_kv_cases(ok_by_end)
-    _print_suspicious_kv_cases(suspicious, topk=topk)
-
     inconsistent = _find_inconsistent_usage_cases(ok_by_end)
     _print_inconsistent_usage_cases(inconsistent, topk=topk)
 
@@ -245,23 +289,36 @@ def main() -> None:
     _write_dialogue_summary_csv(out_path=dialogue_summary_csv, series=dialogue_series)
     print(f"\nWrote dialogue summary CSV: {dialogue_summary_csv.resolve()}")
 
+    # Write backend summary CSV
+    backend_summary_csv = outdir / "backend_summary.csv"
+    _write_backend_summary_csv(out_path=backend_summary_csv, ok_by_end=ok_by_end)
+    print(f"Wrote backend summary CSV: {backend_summary_csv.resolve()}")
+
     # Per-turn aggregates table
     (
-        by_turn_cache,
-        by_turn_kvmatch,
+        by_turn_obs_cache,
+        by_turn_pred_cache,
         by_turn_latency,
+        by_turn_pred_cost,
+        by_turn_obs_total,
+        by_turn_pred_perf,
+        by_turn_correct,
         by_turn_prompt_tok,
         by_turn_cached_tok,
     ) = _compute_per_turn_aggregates(dialogue_series)
+
     _print_per_turn_aggregates(
-        by_turn_cache=by_turn_cache,
-        by_turn_kvmatch=by_turn_kvmatch,
+        by_turn_obs_cache=by_turn_obs_cache,
+        by_turn_pred_cache=by_turn_pred_cache,
         by_turn_latency=by_turn_latency,
+        by_turn_pred_cost=by_turn_pred_cost,
+        by_turn_obs_total=by_turn_obs_total,
+        by_turn_pred_perf=by_turn_pred_perf,
+        by_turn_correct=by_turn_correct,
         by_turn_prompt_tok=by_turn_prompt_tok,
         by_turn_cached_tok=by_turn_cached_tok,
     )
 
-    # Plots (optional via matplotlib)
     _write_plots(
         outdir=outdir,
         ok_by_end=ok_by_end,
@@ -271,11 +328,8 @@ def main() -> None:
         obs_cost=obs_cost,
         pred_cache=pred_cache,
         obs_cache=obs_cache,
-        kvmatch=kvmatch,
-        obs_cache2=obs_cache2,
         dialogue_series=dialogue_series,
         top_lat=top_lat,
-        suspicious=suspicious,
         max_dialogue_plots=int(max(0, args.max_dialogue_plots)),
         min_dialogue_turns=int(max(1, args.min_dialogue_turns)),
         topk=topk,
