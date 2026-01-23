@@ -9,6 +9,31 @@ from typing import Any, Dict, Optional, Union
 
 
 @dataclass(frozen=True, slots=True)
+class RouterBackendScore:
+    """
+    Per-backend router-time score record.
+
+    This is computed before routing to any single backend (i.e., it is suitable
+    for later auction/batching logic where each request is scored against each backend).
+    """
+
+    backend_id: str
+    model: str
+
+    # Router-known prefix-cache proxy feature (backend-specific, because the router
+    # tracks per-backend conversation history).
+    cached_prompt_chars: int
+    kvmatch_lcp_chars: int
+    kvmatch_text: float
+
+    # Predictor outputs (means only; std is currently unused/dummy in the model).
+    pred_latency_ms: float
+    pred_cost_tokens: float
+    pred_perf_prob: float
+    pred_cache_ratio: float
+
+
+@dataclass(frozen=True, slots=True)
 class RouterLogRecord:
     """One router request/response record suitable for JSONL."""
 
@@ -24,7 +49,7 @@ class RouterLogRecord:
     dialogue_id: str
     turn_number: int
 
-    # Router-known decision-time features
+    # Router-known decision-time features (for the chosen backend)
     prompt_chars: int
     cached_prompt_chars: int
     kvmatch_lcp_chars: int
@@ -32,11 +57,14 @@ class RouterLogRecord:
     router_inflight: int
     router_rps_1s: float
 
-    # Predictions
+    # Predictions (for the chosen backend)
     pred_latency_ms: float
     pred_cost_tokens: float
     pred_perf_prob: float
     pred_cache_ratio: float
+
+    # Predictions for all backends (for future auction/batching).
+    backend_scores: list[RouterBackendScore]
 
     # Observations
     completion_id: str
@@ -53,6 +81,7 @@ class RouterLogRecord:
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to a JSON-serializable dict."""
+
         return asdict(self)
 
 
@@ -73,6 +102,7 @@ class AsyncJsonlLogger:
 
     async def __aenter__(self) -> "AsyncJsonlLogger":
         self._task = asyncio.create_task(self._writer_loop())
+
         return self
 
     async def __aexit__(self, exc_type, exc, tb) -> None:
@@ -86,6 +116,7 @@ class AsyncJsonlLogger:
 
     async def close(self) -> None:
         """Flush and stop writer task."""
+
         if self._task is None:
             return
         await self._q.put(None)
