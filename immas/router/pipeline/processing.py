@@ -18,7 +18,10 @@ from immas.router.components.batching import MicroBatchInfo
 from immas.router.components.logger import RouterBackendScore, RouterLogRecord
 from immas.router.components.predictor import PredictorInput
 from immas.router.components.prefix_cache import PrefixMatch, match_prefix
-from immas.router.pipeline.routing import select_backends_round_robin
+from immas.router.pipeline.routing import (
+    select_backends_auction,
+    select_backends_round_robin,
+)
 from immas.router.state import RouterState
 from immas.router.types import PendingChatCompletion, PreparedChatCompletion
 from immas.router.utils import (
@@ -67,12 +70,12 @@ async def _process_one_chat_completion(
     """
     Process exactly one chat completion request and resolve its Future.
 
-    Batch-level scoring is already done in `handle_chat_batch()` and passed in via
-    PreparedChatCompletion. This function focuses on:
-    - forwarding to backend
-    - measuring observations
-    - updating predictor and router prefix cache on success
-    - logging
+    Batch-level scoring and routing is done in `handle_chat_batch()`. This function:
+    - enforces per-backend concurrency via semaphore
+    - forwards to backend
+    - measures observations
+    - updates predictor and router prefix cache on success
+    - logs
     """
 
     pending = prep.pending
@@ -115,19 +118,29 @@ async def _process_one_chat_completion(
         forwarded_body: dict[str, Any] = dict(pending.body)
         forwarded_body["model"] = effective_model
 
-        async with state.load_tracker.track() as load:
-            t0 = time.monotonic()
-            status, resp_json = await backend.forward_chat_completions(
-                forwarded_body,
-                headers=backend_headers,
-            )
-            t1 = time.monotonic()
+        sem = state.backend_semaphores.get(backend.backend_id)
+        if sem is None:
+            # Defensive: should not happen
+            sem = asyncio.Semaphore(1)
 
-            # Note: load fields are sampled during the tracked section.
-            # The logged RouterLogRecord fields currently represent decision-time
-            # features, which are computed in batch handler. We therefore do not
-            # overwrite those fields here.
-            _ = load
+        backend_tracker = state.backend_load_trackers.get(backend.backend_id)
+
+        t0 = time.monotonic()
+        async with sem:
+            # Track both router-global and backend-local inflight.
+            if backend_tracker is None:
+                async with state.load_tracker.track():
+                    status, resp_json = await backend.forward_chat_completions(
+                        forwarded_body,
+                        headers=backend_headers,
+                    )
+            else:
+                async with state.load_tracker.track(), backend_tracker.track():
+                    status, resp_json = await backend.forward_chat_completions(
+                        forwarded_body,
+                        headers=backend_headers,
+                    )
+        t1 = time.monotonic()
 
         obs_latency_ms = (t1 - t0) * 1000.0
         queue_wait_ms = max(0.0, (t0 - pending.t_enqueued_monotonic) * 1000.0)
@@ -251,26 +264,17 @@ async def handle_chat_batch(
     Batch handler invoked by MicroBatcher.
 
     Responsibilities (batch-level):
-    - choose an assigned backend for each request (current: round-robin)
-    - fetch router prefix cache texts for all requests/backends under one lock
+    - serialize prompts
+    - read router prefix cache texts for all requests/backends under one lock
     - compute per-backend prefix match + predictor outputs for each request
+    - run routing policy (round robin or auction) using the whole batch
     - schedule per-request processing tasks
-
-    Notes
-    -----
-    This function must remain reasonably fast because the MicroBatcher awaits it.
     """
 
     if not batch:
         return
-
-    assigned = await select_backends_round_robin(state, len(batch))
-    if len(assigned) != len(batch):
-        fail_pending_batch(
-            batch,
-            status_code=503,
-            message="No backends available",
-        )
+    if not state.backends:
+        fail_pending_batch(batch, status_code=503, message="No backends available")
         return
 
     # Serialize prompts (fail individual bad requests early).
@@ -305,7 +309,7 @@ async def handle_chat_batch(
                     dialogue_id=pending.dialogue_id,
                 )
 
-    # For each request, compute prefix match + predictor inputs and run predictors.
+    # Decision-time router load snapshot.
     load_snap = await state.load_tracker.snapshot()
     router_inflight_decision = int(load_snap.inflight_requests)
     router_rps_1s_decision = float(load_snap.rps)
@@ -349,14 +353,72 @@ async def handle_chat_batch(
         return_exceptions=False,
     )
 
+    # Build backend_scores for every request (stable order: state.backends).
+    backend_scores_by_req: list[list[RouterBackendScore]] = [[] for _ in batch]
+
+    for i, pending in enumerate(batch):
+        if prompt_repr_by_i[i] is None:
+            continue
+        pred_map = preds_by_req[i] if isinstance(preds_by_req[i], dict) else {}
+        pm_map = pm_by_req[i]
+
+        scores: list[RouterBackendScore] = []
+        for b in state.backends:
+            pm = pm_map.get(b.backend_id) or PrefixMatch(
+                ratio=0.0, lcp_chars=0, prompt_chars=0, cached_chars=0
+            )
+            pred = pred_map.get(b.backend_id, {})
+            scores.append(
+                RouterBackendScore(
+                    backend_id=b.backend_id,
+                    model=str(state.backend_model_by_id.get(b.backend_id, "")),
+                    cached_prompt_chars=int(pm.cached_chars),
+                    kvmatch_lcp_chars=int(pm.lcp_chars),
+                    kvmatch_text=float(pm.ratio),
+                    pred_latency_ms=float(pred.get("latency_ms", (0.0, 0.0))[0]),
+                    pred_cost_tokens=float(pred.get("cost_tokens", (0.0, 0.0))[0]),
+                    pred_perf_prob=float(pred.get("performance", (0.0, 0.0))[0]),
+                    pred_cache_ratio=float(pred.get("cache_ratio", (0.0, 0.0))[0]),
+                )
+            )
+        backend_scores_by_req[i] = scores
+
+    # Active indices = requests not already failed early.
+    active_indices: list[int] = [
+        i
+        for i, p in enumerate(batch)
+        if (not p.future.done()) and (prompt_repr_by_i[i] is not None)
+    ]
+
+    # Choose backends for active requests.
+    assigned_by_i: list[Optional[Any]] = [None] * len(batch)
+
+    if state.routing_policy == "auction":
+        assigned_by_i = await select_backends_auction(
+            state,
+            active_indices=active_indices,
+            backend_scores_by_req=backend_scores_by_req,
+        )
+    else:
+        chosen = await select_backends_round_robin(state, len(active_indices))
+        for idx, backend in zip(active_indices, chosen):
+            assigned_by_i[idx] = backend
+
     # Schedule per-request tasks with PreparedChatCompletion
     done_cb = _task_done_callback_factory(state.inflight_request_tasks)
 
     for i, pending in enumerate(batch):
         if pending.future.done():
-            continue  # already failed (e.g. invalid messages)
+            continue
 
-        backend = assigned[i]
+        backend = assigned_by_i[i]
+        if backend is None:
+            try_set_future_result(
+                pending.future,
+                (503, {"error": {"message": "Routing failed: no backend assigned"}}),
+            )
+            continue
+
         backend_model = state.backend_model_by_id.get(backend.backend_id, "")
         if not backend_model:
             try_set_future_result(
@@ -381,30 +443,7 @@ async def handle_chat_batch(
             )
             continue
 
-        # Build RouterBackendScore list (stable order of state.backends).
-        backend_scores: list[RouterBackendScore] = []
-        pred_map = preds_by_req[i] if isinstance(preds_by_req[i], dict) else {}
-        pm_map = pm_by_req[i]
-
-        for b in state.backends:
-            pm = pm_map.get(b.backend_id) or PrefixMatch(
-                ratio=0.0, lcp_chars=0, prompt_chars=0, cached_chars=0
-            )
-            pred = pred_map.get(b.backend_id, {})
-            backend_scores.append(
-                RouterBackendScore(
-                    backend_id=b.backend_id,
-                    model=str(state.backend_model_by_id.get(b.backend_id, "")),
-                    cached_prompt_chars=int(pm.cached_chars),
-                    kvmatch_lcp_chars=int(pm.lcp_chars),
-                    kvmatch_text=float(pm.ratio),
-                    pred_latency_ms=float(pred.get("latency_ms", (0.0, 0.0))[0]),
-                    pred_cost_tokens=float(pred.get("cost_tokens", (0.0, 0.0))[0]),
-                    pred_perf_prob=float(pred.get("performance", (0.0, 0.0))[0]),
-                    pred_cache_ratio=float(pred.get("cache_ratio", (0.0, 0.0))[0]),
-                )
-            )
-
+        scores = backend_scores_by_req[i]
         chosen_inp = inputs_by_req[i].get(backend.backend_id)
         if chosen_inp is None:
             try_set_future_result(
@@ -426,7 +465,7 @@ async def handle_chat_batch(
             effective_model=str(backend_model),
             prompt_repr=str(pr),
             prompt_chars=int(prompt_chars_by_i[i]),
-            backend_scores=backend_scores,
+            backend_scores=list(scores),
             chosen_predictor_input=chosen_inp,
             batch_id=int(info.batch_id),
             batch_size=int(info.batch_size),

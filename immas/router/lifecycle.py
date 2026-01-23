@@ -42,7 +42,10 @@ async def lifespan(app: FastAPI, cfg: RouterAppConfig):
 
     prefix_cache = TextPrefixCache()
     prefix_cache_lock = asyncio.Lock()
+
+    # Router-global load tracker.
     load_tracker = AsyncLoadTracker(window_s=1.0)
+
     backends = [
         HttpOpenAIBackend(
             backend_id=b.backend_id,
@@ -51,17 +54,31 @@ async def lifespan(app: FastAPI, cfg: RouterAppConfig):
         )
         for b in cfg.backends
     ]
+
     backend_model_by_id = {b.backend_id: b.model for b in cfg.backends}
+    backend_capacity_by_id = {b.backend_id: int(b.capacity) for b in cfg.backends}
+
+    # Per-backend concurrency control + load tracking.
+    backend_semaphores: dict[str, asyncio.Semaphore] = {
+        b.backend_id: asyncio.Semaphore(max(1, int(b.capacity))) for b in cfg.backends
+    }
+    backend_load_trackers: dict[str, AsyncLoadTracker] = {
+        b.backend_id: AsyncLoadTracker(window_s=1.0) for b in cfg.backends
+    }
+
     predictors = AsyncBackendPredictorPool(
         backend_ids=[b.backend_id for b in cfg.backends]
     )
+
     rr_lock = asyncio.Lock()
     rr_index = 0
     routing_policy = cfg.router.routing
+
     logger = AsyncJsonlLogger(
         cfg.router.log_path, append=cfg.router.log_append, flush_every=1
     )
     await logger.__aenter__()
+
     inflight_request_tasks: set[asyncio.Task[None]] = set()
 
     # Micro-batcher
@@ -126,6 +143,9 @@ async def lifespan(app: FastAPI, cfg: RouterAppConfig):
         cfg=cfg,
         backends=backends,
         backend_model_by_id=backend_model_by_id,
+        backend_capacity_by_id=backend_capacity_by_id,
+        backend_semaphores=backend_semaphores,
+        backend_load_trackers=backend_load_trackers,
         predictors=predictors,
         prefix_cache=prefix_cache,
         prefix_cache_lock=prefix_cache_lock,
