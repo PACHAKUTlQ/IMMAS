@@ -12,6 +12,7 @@ import time
 
 from typing import Any, Callable, Optional
 
+from immas.common.load import LoadSnapshot
 from immas.openai.chat import extract_first_assistant_message, serialize_chat_messages
 from immas.openai.usage import parse_usage
 from immas.router.auction.mechanism import AuctionParams, compute_welfare
@@ -306,10 +307,40 @@ async def handle_chat_batch(
                     else None
                 )
 
-    # Decision-time router load snapshot.
+    # Decision-time load snapshots.
     load_snap = await state.load_tracker.snapshot()
     router_inflight_decision = int(load_snap.inflight_requests)
     router_rps_1s_decision = float(load_snap.rps)
+
+    # Backend-local snapshots (critical fix): take once per batch.
+    backend_ids = [b.backend_id for b in state.backends]
+
+    async def _backend_snap(backend_id: str) -> LoadSnapshot:
+        tr = state.backend_load_trackers.get(backend_id)
+        if tr is None:
+            # Defensive fallback
+            return LoadSnapshot(
+                inflight_requests=0,
+                rps=0.0,
+                window_s=1.0,
+                t_monotonic=float(time.monotonic()),
+            )
+        return await tr.snapshot()
+
+    backend_snaps = await asyncio.gather(
+        *[_backend_snap(bid) for bid in backend_ids],
+        return_exceptions=False,
+    )
+    backend_inflight_by_id = {
+        bid: int(s.inflight_requests) for bid, s in zip(backend_ids, backend_snaps)
+    }
+    backend_rps_by_id = {
+        bid: float(s.rps) for bid, s in zip(backend_ids, backend_snaps)
+    }
+    backend_cap_by_id = {
+        bid: max(1, int(state.backend_capacity_by_id.get(bid, 1)))
+        for bid in backend_ids
+    }
 
     pm_by_req: list[dict[str, PrefixMatch]] = [{} for _ in batch]
     inputs_by_req: list[dict[str, PredictorInput]] = [{} for _ in batch]
@@ -326,9 +357,11 @@ async def handle_chat_batch(
             pm = match_prefix(prompt_text=pr, cached_text=cached_text)
             pm_by_req[i][b.backend_id] = pm
 
+            bid = b.backend_id
+
             # Predictor input for this (request, backend)
-            inputs_by_req[i][b.backend_id] = PredictorInput(
-                backend_id=b.backend_id,
+            inputs_by_req[i][bid] = PredictorInput(
+                backend_id=bid,
                 model=model,
                 source=pending.source,
                 dialogue_id=pending.dialogue_id,
@@ -337,6 +370,9 @@ async def handle_chat_batch(
                 kvmatch_text=float(pm.ratio),
                 router_inflight=int(router_inflight_decision),
                 router_rps_1s=float(router_rps_1s_decision),
+                backend_inflight=int(backend_inflight_by_id.get(bid, 0)),
+                backend_rps_1s=float(backend_rps_by_id.get(bid, 0.0)),
+                backend_capacity=int(backend_cap_by_id.get(bid, 1)),
             )
 
     async def _predict_for_i(i: int) -> dict[str, dict[str, tuple[float, float]]]:
