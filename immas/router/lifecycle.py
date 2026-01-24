@@ -42,6 +42,10 @@ async def lifespan(app: FastAPI, cfg: "RouterAppConfig"):
     Handles startup and shutdown of resources.
     """
 
+    logging.basicConfig(
+        level=logging.INFO, format="[%(levelname)s] %(name)s: %(message)s"
+    )
+
     prefix_cache = TextPrefixCache()
     prefix_cache_lock = asyncio.Lock()
 
@@ -161,6 +165,7 @@ async def lifespan(app: FastAPI, cfg: "RouterAppConfig"):
 
     # Warmup backends + bootstrap predictors (no JSONL logging).
     try:
+        _log.info("Warming up router...")
         await warmup_router(state)
     except Exception:
         # Warmup should never prevent the router from starting.
