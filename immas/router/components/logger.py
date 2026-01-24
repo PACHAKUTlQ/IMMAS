@@ -1,3 +1,9 @@
+"""
+immas.router.components.logger
+
+Log request data.
+"""
+
 from __future__ import annotations
 
 import asyncio
@@ -40,6 +46,11 @@ class RouterLogRecord:
     run_id: str
     t_start_monotonic: float
     t_end_monotonic: float
+
+    # Micro-batching metadata
+    batch_id: int
+    batch_size: int
+    queue_wait_ms: float
 
     backend_id: str
     backend_base_url_v1: str

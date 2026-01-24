@@ -1,5 +1,5 @@
 """
-immas.router.predictor
+immas.router.components.predictor
 
 Online predictor for latency/cost/performance.
 
@@ -35,13 +35,13 @@ from typing import Any, Dict, Iterable, Mapping
 
 from river import compose, preprocessing, tree
 
-
 Features = Dict[str, Any]
 MetricPred = tuple[float, float]
 Predictions = Dict[str, MetricPred]
 
 
 def _clamp01(x: float) -> float:
+    # Cannot import from utils due to circular imports
     return max(0.0, min(1.0, float(x)))
 
 

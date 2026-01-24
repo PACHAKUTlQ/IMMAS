@@ -2,6 +2,11 @@ router:
   log_path: router_run.jsonl
   log_append: false
   routing: round_robin
+  batching:
+    enabled: true
+    max_batch_size: 16
+    max_wait_ms: 10.0
+    max_queue_size: 4096
 
 backends:
   - id: b0
