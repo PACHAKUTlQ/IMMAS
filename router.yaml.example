@@ -4,10 +4,10 @@ router:
   routing: auction
   warmup:
     enabled: true
-    requests_per_backend: 2
+    requests_per_backend: 3
     max_concurrency: 4
     timeout_s: 30.0
-    max_tokens: 8
+    max_tokens: 1000
   batching:
     enabled: true
     max_batch_size: 16
