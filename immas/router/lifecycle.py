@@ -24,6 +24,7 @@ from immas.router.pipeline.processing import handle_chat_batch
 from immas.router.state import RouterState
 from immas.router.types import PendingChatCompletion
 from immas.router.utils import fail_pending_batch
+from immas.router.warmup import warmup_router
 
 if TYPE_CHECKING:
     from immas.router.config import RouterAppConfig
@@ -161,7 +162,14 @@ async def lifespan(app: FastAPI, cfg: RouterAppConfig):
     router_state_ref["state"] = state
     app.state.router_state = state
 
-    # Start batcher only after state is ready.
+    # Warmup backends + bootstrap predictors (no JSONL logging).
+    try:
+        await warmup_router(state)
+    except Exception:
+        # Warmup should never prevent the router from starting.
+        _log.exception("Warmup failed unexpectedly; continuing startup")
+
+    # Start batcher only after warmup and state is ready.
     await chat_batcher.start()
 
     yield

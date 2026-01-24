@@ -2,6 +2,12 @@ router:
   log_path: router_run.jsonl
   log_append: false
   routing: auction
+  warmup:
+    enabled: true
+    requests_per_backend: 2
+    max_concurrency: 4
+    timeout_s: 30.0
+    max_tokens: 8
   batching:
     enabled: true
     max_batch_size: 16

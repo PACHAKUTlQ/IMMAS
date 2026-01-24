@@ -59,6 +59,37 @@ class RouterBatchingConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class RouterWarmupConfig:
+    """
+    Startup warmup configuration.
+
+    Motivation
+    ----------
+    Warmup solves two practical issues:
+    1) Backend first-request anomalies (model load / compilation / cache init) that
+       distort measurements.
+    2) Auction cold-start degeneracy when predictors initially output near-zero,
+       causing welfare ~= 0 and the MCMF graph to have no edges.
+
+    Warmup is internal-only:
+    - it is run during router startup (FastAPI lifespan),
+    - it does not require any client changes,
+    - it does not write JSONL logs,
+    - it does update predictors using observed latency and token usage.
+
+    Notes
+    -----
+    - Keep prompts short; the goal is initialization + predictor bootstrap, not cache priming.
+    """
+
+    enabled: bool = True
+    requests_per_backend: int = 2
+    max_concurrency: int = 4
+    timeout_s: float = 30.0
+    max_tokens: int = 8
+
+
+@dataclass(frozen=True, slots=True)
 class RouterAuctionConfig:
     """
     Auction configuration.
@@ -94,6 +125,7 @@ class RouterConfig:
     log_append: bool = False
     routing: RoutingPolicy = "round_robin"
     batching: RouterBatchingConfig = field(default_factory=RouterBatchingConfig)
+    warmup: RouterWarmupConfig = field(default_factory=RouterWarmupConfig)
     auction: RouterAuctionConfig = field(default_factory=RouterAuctionConfig)
 
 
@@ -152,6 +184,41 @@ def load_router_app_config(path: str) -> RouterAppConfig:
     if max_queue_size < 0:
         raise ValueError(
             f"router.batching.max_queue_size must be >= 0, got {max_queue_size}"
+        )
+
+    warmup_raw = _as_mapping(router_raw.get("warmup", {}), ctx="root.router.warmup")
+    warmup_enabled = _as_bool(
+        warmup_raw.get("enabled", True), ctx="router.warmup.enabled"
+    )
+    requests_per_backend = _as_int(
+        warmup_raw.get("requests_per_backend", 2),
+        ctx="router.warmup.requests_per_backend",
+    )
+    warmup_max_concurrency = _as_int(
+        warmup_raw.get("max_concurrency", 4), ctx="router.warmup.max_concurrency"
+    )
+    warmup_timeout_s = _as_float(
+        warmup_raw.get("timeout_s", 30.0), ctx="router.warmup.timeout_s"
+    )
+    warmup_max_tokens = _as_int(
+        warmup_raw.get("max_tokens", 8), ctx="router.warmup.max_tokens"
+    )
+
+    if requests_per_backend < 0:
+        raise ValueError(
+            f"router.warmup.requests_per_backend must be >= 0, got {
+                requests_per_backend
+            }"
+        )
+    if warmup_max_concurrency < 1:
+        raise ValueError(
+            f"router.warmup.max_concurrency must be >= 1, got {warmup_max_concurrency}"
+        )
+    if warmup_timeout_s <= 0:
+        raise ValueError(f"router.warmup.timeout_s must be > 0, got {warmup_timeout_s}")
+    if warmup_max_tokens < 1:
+        raise ValueError(
+            f"router.warmup.max_tokens must be >= 1, got {warmup_max_tokens}"
         )
 
     auction_raw = _as_mapping(router_raw.get("auction", {}), ctx="root.router.auction")
@@ -236,6 +303,13 @@ def load_router_app_config(path: str) -> RouterAppConfig:
                 max_batch_size=int(max_batch_size),
                 max_wait_ms=float(max_wait_ms),
                 max_queue_size=int(max_queue_size),
+            ),
+            warmup=RouterWarmupConfig(
+                enabled=bool(warmup_enabled),
+                requests_per_backend=int(requests_per_backend),
+                max_concurrency=int(warmup_max_concurrency),
+                timeout_s=float(warmup_timeout_s),
+                max_tokens=int(warmup_max_tokens),
             ),
             auction=RouterAuctionConfig(
                 quality_scale=float(quality_scale),
