@@ -211,7 +211,7 @@ def solve_allocation_mcmf(
         if caps[j] > 0:
             edges.append((back0 + j, t, caps[j], 0))
 
-    # Only positive-welfare edges (paper/simulation consistent).
+    # Only positive-welfare edges.
     for i in range(n_tasks):
         row = welfare[i]
         for j in range(n_backends):

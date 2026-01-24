@@ -37,7 +37,7 @@ class RouterBackendScore:
     pred_perf_prob: float
     pred_cache_ratio: float
 
-    # Auction-derived values (paper-aligned):
+    # Auction-derived values:
     # client_valuation := δ * (P*quality_scale) - (1-δ) * (L*latency_scale)
     # base_cost := cost_scale * pred_cost_tokens
     # welfare := client_valuation - base_cost
@@ -81,7 +81,7 @@ class RouterLogRecord:
     pred_perf_prob: float
     pred_cache_ratio: float
 
-    # Auction-related fields (paper-aligned; payments only meaningful when auction_matched=True).
+    # Auction-related fields
     routing_policy: str
     auction_matched: bool
     auction_total_welfare: float

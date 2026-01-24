@@ -45,10 +45,10 @@ async def select_backends_round_robin(
 @dataclass(frozen=True, slots=True)
 class AuctionDecision:
     """
-    Determine δ (quality-vs-latency preference) for a request.
+    Determine δ (quality-vs-latency preference) for a batch of requests.
 
-    Currently we use a single default δ from config.
-    This is the minimal, production-safe choice (paper structure is preserved).
+    Contains per-request backend assignments, match flags, total welfare,
+    and VCG-based fees and payments computed by the auction mechanism.
     """
 
     assigned_by_i: list[Optional[HttpOpenAIBackend]]
