@@ -63,30 +63,27 @@ class RouterWarmupConfig:
     """
     Startup warmup configuration.
 
-    Motivation
-    ----------
-    Warmup solves two practical issues:
-    1) Backend first-request anomalies (model load / compilation / cache init) that
-       distort measurements.
-    2) Auction cold-start degeneracy when predictors initially output near-zero,
-       causing welfare ~= 0 and the MCMF graph to have no edges.
-
-    Warmup is internal-only:
-    - it is run during router startup (FastAPI lifespan),
-    - it does not require any client changes,
-    - it does not write JSONL logs,
-    - it does update predictors using observed latency and token usage.
-
-    Notes
-    -----
-    - Keep prompts short; the goal is initialization + predictor bootstrap, not cache priming.
+    Warmup runs internally during router startup and does not affect client-visible
+    behavior or router JSONL logs.
     """
 
     enabled: bool = True
-    requests_per_backend: int = 2
+
+    # Dataset selection
+    coqa_split: str = "validation"
+    max_dialogues: int = 1
+    max_turns_per_dialogue: int = 2
+    shuffle_dialogues: bool = False
+    seed: int = 0
+
+    # Request behavior
     max_concurrency: int = 4
     timeout_s: float = 30.0
-    max_tokens: int = 8
+    max_tokens: int = 16
+
+    # A short marker prepended to the warmup system message. A per-startup nonce
+    # is appended at runtime.
+    system_prefix: str = "IMMAS_WARMUP"
 
 
 @dataclass(frozen=True, slots=True)
@@ -190,10 +187,22 @@ def load_router_app_config(path: str) -> RouterAppConfig:
     warmup_enabled = _as_bool(
         warmup_raw.get("enabled", True), ctx="router.warmup.enabled"
     )
-    requests_per_backend = _as_int(
-        warmup_raw.get("requests_per_backend", 2),
-        ctx="router.warmup.requests_per_backend",
+    coqa_split = _as_str(
+        warmup_raw.get("coqa_split", "validation"), ctx="router.warmup.coqa_split"
     )
+    warmup_max_dialogues = _as_int(
+        warmup_raw.get("max_dialogues", 1), ctx="router.warmup.max_dialogues"
+    )
+    warmup_max_turns = _as_int(
+        warmup_raw.get("max_turns_per_dialogue", 2),
+        ctx="router.warmup.max_turns_per_dialogue",
+    )
+    warmup_shuffle = _as_bool(
+        warmup_raw.get("shuffle_dialogues", False),
+        ctx="router.warmup.shuffle_dialogues",
+    )
+    warmup_seed = _as_int(warmup_raw.get("seed", 0), ctx="router.warmup.seed")
+
     warmup_max_concurrency = _as_int(
         warmup_raw.get("max_concurrency", 4), ctx="router.warmup.max_concurrency"
     )
@@ -201,14 +210,20 @@ def load_router_app_config(path: str) -> RouterAppConfig:
         warmup_raw.get("timeout_s", 30.0), ctx="router.warmup.timeout_s"
     )
     warmup_max_tokens = _as_int(
-        warmup_raw.get("max_tokens", 8), ctx="router.warmup.max_tokens"
+        warmup_raw.get("max_tokens", 16), ctx="router.warmup.max_tokens"
+    )
+    system_prefix = _as_str(
+        warmup_raw.get("system_prefix", "IMMAS_WARMUP"),
+        ctx="router.warmup.system_prefix",
     )
 
-    if requests_per_backend < 0:
+    if warmup_max_dialogues < 0:
         raise ValueError(
-            f"router.warmup.requests_per_backend must be >= 0, got {
-                requests_per_backend
-            }"
+            f"router.warmup.max_dialogues must be >= 0, got {warmup_max_dialogues}"
+        )
+    if warmup_max_turns < 0:
+        raise ValueError(
+            f"router.warmup.max_turns_per_dialogue must be >= 0, got {warmup_max_turns}"
         )
     if warmup_max_concurrency < 1:
         raise ValueError(
@@ -306,10 +321,15 @@ def load_router_app_config(path: str) -> RouterAppConfig:
             ),
             warmup=RouterWarmupConfig(
                 enabled=bool(warmup_enabled),
-                requests_per_backend=int(requests_per_backend),
+                coqa_split=str(coqa_split or "validation"),
+                max_dialogues=int(warmup_max_dialogues),
+                max_turns_per_dialogue=int(warmup_max_turns),
+                shuffle_dialogues=bool(warmup_shuffle),
+                seed=int(warmup_seed),
                 max_concurrency=int(warmup_max_concurrency),
                 timeout_s=float(warmup_timeout_s),
                 max_tokens=int(warmup_max_tokens),
+                system_prefix=str(system_prefix or "IMMAS_WARMUP"),
             ),
             auction=RouterAuctionConfig(
                 quality_scale=float(quality_scale),

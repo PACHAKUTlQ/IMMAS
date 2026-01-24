@@ -1,258 +1,279 @@
 """
 immas.router.warmup
 
-Internal startup warmup for the router.
-
-This module performs a small number of synthetic chat-completion requests to
-each configured backend during router startup (FastAPI lifespan), to:
-
-- avoid first-request backend anomalies (model load, compilation, etc.)
-- bootstrap online predictors so auction routing does not degenerate at cold start
-
-Warmup is intentionally *not* exposed to clients and does not write JSONL logs.
+Startup warmup for backends and online predictors using real dataset dialogues.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
+import random
 import time
+import uuid
 
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Any, Mapping
 
-from immas.openai.chat import serialize_chat_messages
+from datasets import load_dataset
+
+from immas.data.coqa.loader import COQA_DATASET_NAME, CoqaDialogue
+from immas.openai.chat import extract_first_assistant_message, serialize_chat_messages
 from immas.openai.usage import parse_usage
+from immas.router.components.performance import PerformanceEvalContext
 from immas.router.components.predictor import PredictorInput
+from immas.router.components.prefix_cache import match_prefix
 from immas.router.state import RouterState
 
 _log = logging.getLogger(__name__)
 
+_SYSTEM_BASE = (
+    "Answer the user's questions using the story. Be factual. Think very carefully "
+    "and show your thinking steps, and then output the answer at the last line, "
+    "below your thinking."
+)
+
 
 @dataclass(frozen=True, slots=True)
-class WarmupOutcome:
-    """One warmup request outcome."""
-
+class WarmupStats:
     backend_id: str
-    ok: bool
-    obs_latency_ms: float
-    obs_total_tokens: int
-    error: Optional[str] = None
+    ok: int = 0
+    err: int = 0
+    total_latency_ms: float = 0.0
+    total_tokens: int = 0
+
+    def add_ok(self, *, latency_ms: float, total_tokens: int) -> "WarmupStats":
+        return WarmupStats(
+            backend_id=self.backend_id,
+            ok=self.ok + 1,
+            err=self.err,
+            total_latency_ms=self.total_latency_ms + float(latency_ms),
+            total_tokens=self.total_tokens + int(total_tokens),
+        )
+
+    def add_err(self) -> "WarmupStats":
+        return WarmupStats(
+            backend_id=self.backend_id,
+            ok=self.ok,
+            err=self.err + 1,
+            total_latency_ms=self.total_latency_ms,
+            total_tokens=self.total_tokens,
+        )
 
 
-def _make_warmup_messages(*, backend_id: str, k: int) -> list[dict[str, Any]]:
-    """
-    Create a small deterministic warmup conversation.
+def _initial_messages(
+    dialogue: CoqaDialogue, *, system_text: str
+) -> list[dict[str, Any]]:
+    story_msg = {
+        "role": "user",
+        "content": f"Story (source={dialogue.source}, id={dialogue.dialogue_id}):\n{dialogue.story}",
+    }
+    return [{"role": "system", "content": system_text}, story_msg]
 
-    Keep it short to avoid polluting backend KV cache or consuming significant compute.
-    """
-    return [
-        {"role": "system", "content": "You are a helpful assistant."},
-        {
-            "role": "user",
-            "content": f"Warmup request {k} for backend {backend_id}. Reply with 'ok'.",
-        },
-    ]
+
+def _load_dialogues(
+    *, split: str, max_dialogues: int, shuffle: bool, seed: int
+) -> list[CoqaDialogue]:
+    ds = load_dataset(COQA_DATASET_NAME, split=split)
+    dialogues: list[CoqaDialogue] = []
+    for i, ex in enumerate(ds):
+        if i >= max_dialogues:
+            break
+        dialogues.append(CoqaDialogue.from_hf_example(ex))
+
+    if shuffle and dialogues:
+        rng = random.Random(int(seed))
+        rng.shuffle(dialogues)
+
+    return dialogues
 
 
 async def warmup_router(state: RouterState) -> None:
     """
-    Run startup warmup according to config.
+    Warm up backends and bootstrap predictors using dataset-based multi-turn chats.
 
-    Notes
-    -----
-    - This runs before the micro-batcher starts and before the app begins serving traffic.
-    - Failures are logged but do not prevent the router from starting.
+    The warmup requests are not logged and do not update the router prefix cache.
     """
     cfg = state.cfg.router.warmup
     if not cfg.enabled:
-        _log.info("Warmup disabled (router.warmup.enabled=false)")
         return
-    if cfg.requests_per_backend <= 0:
-        _log.info("Warmup enabled but requests_per_backend <= 0; skipping")
+    if cfg.max_dialogues <= 0 or cfg.max_turns_per_dialogue <= 0:
         return
     if not state.backends:
-        _log.warning("Warmup skipped: no backends configured")
         return
 
-    _log.info(
-        "Warmup starting: backends=%s requests_per_backend=%s max_concurrency=%s timeout_s=%s",
-        len(state.backends),
-        cfg.requests_per_backend,
-        cfg.max_concurrency,
-        cfg.timeout_s,
-    )
+    nonce = uuid.uuid4().hex[:12]
+    system_text = f"{cfg.system_prefix} {nonce}\n{_SYSTEM_BASE}"
 
-    sem = asyncio.Semaphore(int(cfg.max_concurrency))
-    outcomes: list[WarmupOutcome] = []
+    try:
+        dialogues = _load_dialogues(
+            split=str(cfg.coqa_split or "validation"),
+            max_dialogues=int(cfg.max_dialogues),
+            shuffle=bool(cfg.shuffle_dialogues),
+            seed=int(cfg.seed),
+        )
+    except Exception:
+        _log.exception("Warmup dataset load failed; skipping warmup")
+        return
 
-    async def _one(backend_idx: int, k: int) -> None:
-        backend = state.backends[backend_idx]
-        backend_id = backend.backend_id
+    if not dialogues:
+        return
+
+    global_sem = asyncio.Semaphore(int(cfg.max_concurrency))
+
+    # Local warmup-only prefix state (does not touch router prefix cache).
+    cached_prompt_by_backend_dialogue: dict[tuple[str, str], str] = {}
+
+    stats_by_backend: dict[str, WarmupStats] = {
+        b.backend_id: WarmupStats(backend_id=b.backend_id) for b in state.backends
+    }
+
+    async def _run_dialogue_on_backend(
+        *, backend_id: str, dialogue: CoqaDialogue, run_id: str
+    ) -> None:
+        backend = next((b for b in state.backends if b.backend_id == backend_id), None)
+        if backend is None:
+            return
         model = state.backend_model_by_id.get(backend_id, "")
         if not model:
-            outcomes.append(
-                WarmupOutcome(
-                    backend_id=backend_id,
-                    ok=False,
-                    obs_latency_ms=0.0,
-                    obs_total_tokens=0,
-                    error="missing_backend_model",
-                )
-            )
             return
 
-        messages = _make_warmup_messages(backend_id=backend_id, k=k)
-        prompt_repr = serialize_chat_messages(messages)
-
-        # Snapshot load (very likely zeros at startup, but keep it correct).
-        router_snap = await state.load_tracker.snapshot()
-        backend_tracker = state.backend_load_trackers.get(backend_id)
-        if backend_tracker is None:
-            backend_inflight = 0
-            backend_rps = 0.0
-        else:
-            bs = await backend_tracker.snapshot()
-            backend_inflight = int(bs.inflight_requests)
-            backend_rps = float(bs.rps)
-
-        cap = max(1, int(state.backend_capacity_by_id.get(backend_id, 1)))
-
-        inp = PredictorInput(
-            backend_id=backend_id,
-            model=model,
-            source="warmup",
-            dialogue_id="__immas_warmup__",
-            turn_number=int(k),
-            prompt_repr=prompt_repr,
-            kvmatch_text=0.0,
-            router_inflight=int(router_snap.inflight_requests),
-            router_rps_1s=float(router_snap.rps),
-            backend_inflight=int(backend_inflight),
-            backend_rps_1s=float(backend_rps),
-            backend_capacity=int(cap),
+        messages: list[dict[str, Any]] = _initial_messages(
+            dialogue, system_text=system_text
         )
+        n_turns = min(dialogue.num_turns(), int(cfg.max_turns_per_dialogue))
 
-        body: dict[str, Any] = {
-            "model": model,
-            "messages": messages,
-            "temperature": 0,
-            "max_tokens": int(cfg.max_tokens),
-            "stream": False,
-        }
+        for turn_idx in range(n_turns):
+            turn_number = turn_idx + 1
+            question = dialogue.questions[turn_idx]
+            messages.append({"role": "user", "content": f"Q{turn_number}: {question}"})
 
-        async with sem:
-            t0 = time.monotonic()
-            try:
-                backend_sem = state.backend_semaphores.get(
-                    backend_id
-                ) or asyncio.Semaphore(1)
+            prompt_repr = serialize_chat_messages(messages)
 
-                async with backend_sem:
-                    # Track inflight for both global and backend-local load trackers.
-                    if backend_tracker is None:
-                        async with state.load_tracker.track():
-                            status, resp_json = await asyncio.wait_for(
-                                backend.forward_chat_completions(body, headers=None),
-                                timeout=float(cfg.timeout_s),
-                            )
-                    else:
-                        async with state.load_tracker.track(), backend_tracker.track():
-                            status, resp_json = await asyncio.wait_for(
-                                backend.forward_chat_completions(body, headers=None),
-                                timeout=float(cfg.timeout_s),
-                            )
+            cache_key = (backend_id, dialogue.dialogue_id)
+            cached_text = cached_prompt_by_backend_dialogue.get(cache_key)
+            pm = match_prefix(prompt_text=prompt_repr, cached_text=cached_text)
 
-                t1 = time.monotonic()
-                obs_latency_ms = (t1 - t0) * 1000.0
+            inp = PredictorInput(
+                backend_id=backend_id,
+                model=model,
+                source=dialogue.source,
+                dialogue_id=dialogue.dialogue_id,
+                turn_number=int(turn_number),
+                prompt_repr=prompt_repr,
+                kvmatch_text=float(pm.ratio),
+                router_inflight=0,
+                router_rps_1s=0.0,
+                backend_inflight=0,
+                backend_rps_1s=0.0,
+                backend_capacity=max(
+                    1, int(state.backend_capacity_by_id.get(backend_id, 1))
+                ),
+            )
 
-                if not (200 <= int(status) < 300):
-                    outcomes.append(
-                        WarmupOutcome(
-                            backend_id=backend_id,
-                            ok=False,
-                            obs_latency_ms=float(obs_latency_ms),
-                            obs_total_tokens=0,
-                            error=f"backend_status={status}",
+            body: dict[str, Any] = {
+                "model": model,
+                "messages": list(messages),
+                "temperature": 0,
+                "max_tokens": int(cfg.max_tokens),
+                "stream": False,
+            }
+
+            headers: Mapping[str, str] = {
+                "X-IMMAS-RUN-ID": run_id,
+                "X-IMMAS-DIALOGUE-ID": dialogue.dialogue_id,
+                "X-IMMAS-TURN-NUMBER": str(turn_number),
+                "X-IMMAS-SOURCE": dialogue.source,
+            }
+
+            async with global_sem:
+                t0 = time.monotonic()
+                try:
+                    backend_sem = state.backend_semaphores.get(
+                        backend_id
+                    ) or asyncio.Semaphore(1)
+                    async with backend_sem:
+                        status, resp_json = await asyncio.wait_for(
+                            backend.forward_chat_completions(body, headers=headers),
+                            timeout=float(cfg.timeout_s),
                         )
-                    )
+                    t1 = time.monotonic()
+                except asyncio.TimeoutError:
+                    stats_by_backend[backend_id] = stats_by_backend[
+                        backend_id
+                    ].add_err()
+                    return
+                except Exception:
+                    stats_by_backend[backend_id] = stats_by_backend[
+                        backend_id
+                    ].add_err()
                     return
 
-                usage = parse_usage(resp_json if isinstance(resp_json, dict) else {})
-                obs_total_tokens = int(usage.total_tokens)
+            if not (200 <= int(status) < 300) or not isinstance(resp_json, Mapping):
+                stats_by_backend[backend_id] = stats_by_backend[backend_id].add_err()
+                return
 
-                # Update predictor (no logging).
-                await state.predictors.update_one(
-                    inp,
-                    real_latency_ms=float(obs_latency_ms),
-                    real_cost_tokens=int(obs_total_tokens),
-                    real_perf_correct=True,
-                )
+            obs_latency_ms = (t1 - t0) * 1000.0
+            usage = parse_usage(resp_json)
+            obs_total_tokens = int(usage.total_tokens)
 
-                outcomes.append(
-                    WarmupOutcome(
-                        backend_id=backend_id,
-                        ok=True,
-                        obs_latency_ms=float(obs_latency_ms),
-                        obs_total_tokens=int(obs_total_tokens),
-                    )
-                )
-            except asyncio.TimeoutError:
-                outcomes.append(
-                    WarmupOutcome(
-                        backend_id=backend_id,
-                        ok=False,
-                        obs_latency_ms=0.0,
-                        obs_total_tokens=0,
-                        error="timeout",
-                    )
-                )
-            except Exception as e:
-                outcomes.append(
-                    WarmupOutcome(
-                        backend_id=backend_id,
-                        ok=False,
-                        obs_latency_ms=0.0,
-                        obs_total_tokens=0,
-                        error=f"{type(e).__name__}: {e}",
-                    )
-                )
+            ctx = PerformanceEvalContext(
+                run_id=run_id,
+                dialogue_id=dialogue.dialogue_id,
+                turn_number=int(turn_number),
+                source=dialogue.source,
+                request_body=body,
+                response_json=resp_json,
+            )
+            correct = bool(state.perf_evaluator.evaluate(ctx))
 
+            await state.predictors.update_one(
+                inp,
+                real_latency_ms=float(obs_latency_ms),
+                real_cost_tokens=int(obs_total_tokens),
+                real_perf_correct=bool(correct),
+            )
+
+            assistant = extract_first_assistant_message(resp_json)
+            if assistant is None:
+                stats_by_backend[backend_id] = stats_by_backend[backend_id].add_err()
+                return
+
+            # Multi-turn continuation uses the actual returned assistant message.
+            messages.append(assistant.to_openai_message())
+            cached_prompt_by_backend_dialogue[cache_key] = serialize_chat_messages(
+                messages
+            )
+
+            stats_by_backend[backend_id] = stats_by_backend[backend_id].add_ok(
+                latency_ms=float(obs_latency_ms), total_tokens=int(obs_total_tokens)
+            )
+
+    run_id = f"warmup_{nonce}"
     tasks: list[asyncio.Task[None]] = []
-    for bi in range(len(state.backends)):
-        for k in range(1, int(cfg.requests_per_backend) + 1):
-            tasks.append(asyncio.create_task(_one(bi, k)))
+    for b in state.backends:
+        for d in dialogues:
+            tasks.append(
+                asyncio.create_task(
+                    _run_dialogue_on_backend(
+                        backend_id=b.backend_id, dialogue=d, run_id=run_id
+                    )
+                )
+            )
 
-    await asyncio.gather(*tasks, return_exceptions=False)
+    await asyncio.gather(*tasks, return_exceptions=True)
 
-    # Summarize.
-    ok = [o for o in outcomes if o.ok]
-    err = [o for o in outcomes if not o.ok]
-
-    by_backend: dict[str, list[WarmupOutcome]] = {}
-    for o in outcomes:
-        by_backend.setdefault(o.backend_id, []).append(o)
-
+    # Summary logging only (no JSONL writes).
     parts: list[str] = []
-    for bid, outs in sorted(by_backend.items()):
-        oks = [x for x in outs if x.ok]
-        if oks:
-            avg_lat = sum(x.obs_latency_ms for x in oks) / len(oks)
-            avg_tok = sum(x.obs_total_tokens for x in oks) / len(oks)
+    for bid in sorted(stats_by_backend.keys()):
+        st = stats_by_backend[bid]
+        n = st.ok
+        if n > 0:
             parts.append(
-                f"{bid}: ok={len(oks)}/{len(outs)} avg_lat_ms={avg_lat:.1f} avg_tok={
-                    avg_tok:.1f}"
+                f"{bid}: ok={st.ok} err={st.err} avg_lat_ms={
+                    st.total_latency_ms / n:.1f} "
+                f"avg_tok={st.total_tokens / n:.1f}"
             )
         else:
-            parts.append(f"{bid}: ok=0/{len(outs)}")
-
-    _log.info(
-        "Warmup finished: ok=%s err=%s (%s)",
-        len(ok),
-        len(err),
-        "; ".join(parts),
-    )
-    if err:
-        # Log a few representative errors (avoid huge logs).
-        for o in err[: min(10, len(err))]:
-            _log.warning("Warmup error backend=%s err=%s", o.backend_id, o.error)
+            parts.append(f"{bid}: ok=0 err={st.err}")
+    _log.info("Warmup complete (%s)", "; ".join(parts))

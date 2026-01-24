@@ -18,6 +18,7 @@ from immas.common.load import AsyncLoadTracker
 from immas.router.components.backend import HttpOpenAIBackend
 from immas.router.components.batching import MicroBatchInfo, MicroBatcher
 from immas.router.components.logger import AsyncJsonlLogger
+from immas.router.components.performance import AlwaysCorrectEvaluator
 from immas.router.components.predictor import AsyncBackendPredictorPool
 from immas.router.components.prefix_cache import TextPrefixCache
 from immas.router.pipeline.processing import handle_chat_batch
@@ -34,7 +35,7 @@ _log = logging.getLogger(__name__)
 
 
 @asynccontextmanager
-async def lifespan(app: FastAPI, cfg: RouterAppConfig):
+async def lifespan(app: FastAPI, cfg: "RouterAppConfig"):
     """
     Application lifespan context manager for the router.
 
@@ -70,6 +71,7 @@ async def lifespan(app: FastAPI, cfg: RouterAppConfig):
     predictors = AsyncBackendPredictorPool(
         backend_ids=[b.backend_id for b in cfg.backends]
     )
+    perf_evaluator = AlwaysCorrectEvaluator()
 
     rr_lock = asyncio.Lock()
     rr_index = 0
@@ -105,13 +107,7 @@ async def lifespan(app: FastAPI, cfg: RouterAppConfig):
 
         st = router_state_ref.get("state")
         if st is None:
-            # Extremely defensive: should not happen because we start the batcher
-            # only after setting router_state_ref["state"].
-            fail_pending_batch(
-                batch,
-                status_code=503,
-                message="Router not ready",
-            )
+            fail_pending_batch(batch, status_code=503, message="Router not ready")
             return
 
         try:
@@ -147,6 +143,7 @@ async def lifespan(app: FastAPI, cfg: RouterAppConfig):
         backend_semaphores=backend_semaphores,
         backend_load_trackers=backend_load_trackers,
         predictors=predictors,
+        perf_evaluator=perf_evaluator,
         prefix_cache=prefix_cache,
         prefix_cache_lock=prefix_cache_lock,
         chat_batcher=chat_batcher,

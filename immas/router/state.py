@@ -11,6 +11,7 @@ import asyncio
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+from immas.router.components.performance import PerformanceEvaluator
 
 if TYPE_CHECKING:
     from immas.common.load import AsyncLoadTracker
@@ -27,7 +28,7 @@ if TYPE_CHECKING:
 class RouterState:
     """A container for all router-specific state."""
 
-    cfg: RouterAppConfig
+    cfg: "RouterAppConfig"
     backends: list["HttpOpenAIBackend"]
     backend_model_by_id: dict[str, str]
 
@@ -37,6 +38,8 @@ class RouterState:
     backend_load_trackers: dict[str, "AsyncLoadTracker"]
 
     predictors: "AsyncBackendPredictorPool"
+    perf_evaluator: PerformanceEvaluator
+
     prefix_cache: "TextPrefixCache"
     prefix_cache_lock: asyncio.Lock
     chat_batcher: "MicroBatcher[PendingChatCompletion]"

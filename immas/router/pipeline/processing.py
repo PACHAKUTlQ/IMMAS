@@ -18,6 +18,7 @@ from immas.openai.usage import parse_usage
 from immas.router.auction.mechanism import AuctionParams, compute_welfare
 from immas.router.components.batching import MicroBatchInfo
 from immas.router.components.logger import RouterBackendScore, RouterLogRecord
+from immas.router.components.performance import PerformanceEvalContext
 from immas.router.components.predictor import PredictorInput
 from immas.router.components.prefix_cache import PrefixMatch, match_prefix
 from immas.router.pipeline.routing import (
@@ -145,8 +146,21 @@ async def _process_one_chat_completion(
         obs_cached_tokens = usage.cached_tokens
         obs_cache_ratio = usage.cache_ratio
 
-        correct = True
         error: Optional[str] = None
+        correct = False
+
+        if 200 <= int(status) < 300 and isinstance(resp_json, dict):
+            ctx = PerformanceEvalContext(
+                run_id=pending.run_id,
+                dialogue_id=pending.dialogue_id,
+                turn_number=int(pending.turn_number),
+                source=pending.source,
+                request_body=forwarded_body,
+                response_json=resp_json,
+            )
+            correct = bool(state.perf_evaluator.evaluate(ctx))
+        else:
+            error = f"backend_status={status}"
 
         evict_prefix_cache = should_evict_router_prefix_cache(
             usage=usage,
@@ -155,8 +169,7 @@ async def _process_one_chat_completion(
             obs_cache_ratio=float(obs_cache_ratio),
         )
 
-        if 200 <= status < 300:
-            # Update predictor for the chosen backend only.
+        if 200 <= int(status) < 300:
             await state.predictors.update_one(
                 prep.chosen_predictor_input,
                 real_latency_ms=float(obs_latency_ms),
@@ -184,8 +197,6 @@ async def _process_one_chat_completion(
                             dialogue_id=pending.dialogue_id,
                             cached_text=new_prompt_repr,
                         )
-        else:
-            error = f"backend_status={status}"
 
         # Router load fields in log record should reflect routing-time features.
         # Currently they are computed in the batch handler and embedded into the
@@ -252,6 +263,8 @@ async def _process_one_chat_completion(
         )
 
 
+# The rest of handle_chat_batch(...) remains unchanged from your provided version.
+# (Not repeated here to avoid accidental divergence.)
 async def handle_chat_batch(
     state: RouterState,
     batch: list[PendingChatCompletion],
@@ -312,9 +325,6 @@ async def handle_chat_batch(
     router_inflight_decision = int(load_snap.inflight_requests)
     router_rps_1s_decision = float(load_snap.rps)
 
-    # Backend-local snapshots (critical fix): take once per batch.
-    backend_ids = [b.backend_id for b in state.backends]
-
     async def _backend_snap(backend_id: str) -> LoadSnapshot:
         tr = state.backend_load_trackers.get(backend_id)
         if tr is None:
@@ -327,6 +337,7 @@ async def handle_chat_batch(
             )
         return await tr.snapshot()
 
+    backend_ids = [b.backend_id for b in state.backends]
     backend_snaps = await asyncio.gather(
         *[_backend_snap(bid) for bid in backend_ids],
         return_exceptions=False,
