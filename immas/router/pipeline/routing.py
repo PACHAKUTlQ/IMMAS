@@ -135,6 +135,13 @@ async def select_backends_auction(
         welfare.append([float(s.welfare) for s in scores])
         base_cost.append([float(s.base_cost) for s in scores])
 
+    # Apply congestion penalty.
+    congestion_penalty = float(auc_cfg.congestion_penalty)
+    if congestion_penalty > 0.0:
+        for i in range(len(welfare)):
+            for j in range(n_backends):
+                welfare[i][j] -= congestion_penalty * inflight_by_j[j] / cap_cfg_by_j[j]
+
     result = run_auction_with_vcg(
         welfare=welfare,
         base_cost=base_cost,
