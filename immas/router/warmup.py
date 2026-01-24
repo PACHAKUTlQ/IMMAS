@@ -33,6 +33,8 @@ _SYSTEM_BASE = (
     "below your thinking."
 )
 
+_WARMUP_TRAIN_LATENCY_MS: float = 250.0
+
 
 @dataclass(frozen=True, slots=True)
 class WarmupStats:
@@ -92,7 +94,12 @@ async def warmup_router(state: RouterState) -> None:
     """
     Warm up backends and bootstrap predictors using dataset-based multi-turn chats.
 
-    The warmup requests are not logged and do not update the router prefix cache.
+    Warmup requests are not logged and do not update the router prefix cache.
+
+    Important
+    ---------
+    The predictor update uses a fixed latency label (same for all backends) to
+    avoid contaminating the model with backend "first request" latency anomalies.
     """
     cfg = state.cfg.router.warmup
     if not cfg.enabled:
@@ -187,17 +194,18 @@ async def warmup_router(state: RouterState) -> None:
             }
 
             async with global_sem:
-                t0 = time.monotonic()
                 try:
                     backend_sem = state.backend_semaphores.get(
                         backend_id
                     ) or asyncio.Semaphore(1)
                     async with backend_sem:
+                        _t0 = time.monotonic()
                         status, resp_json = await asyncio.wait_for(
                             backend.forward_chat_completions(body, headers=headers),
                             timeout=float(cfg.timeout_s),
                         )
-                    t1 = time.monotonic()
+                        _t1 = time.monotonic()
+                        _ = _t1 - _t0
                 except asyncio.TimeoutError:
                     stats_by_backend[backend_id] = stats_by_backend[
                         backend_id
@@ -213,7 +221,6 @@ async def warmup_router(state: RouterState) -> None:
                 stats_by_backend[backend_id] = stats_by_backend[backend_id].add_err()
                 return
 
-            obs_latency_ms = (t1 - t0) * 1000.0
             usage = parse_usage(resp_json)
             obs_total_tokens = int(usage.total_tokens)
 
@@ -229,7 +236,7 @@ async def warmup_router(state: RouterState) -> None:
 
             await state.predictors.update_one(
                 inp,
-                real_latency_ms=float(obs_latency_ms),
+                real_latency_ms=float(_WARMUP_TRAIN_LATENCY_MS),
                 real_cost_tokens=int(obs_total_tokens),
                 real_perf_correct=bool(correct),
             )
@@ -246,7 +253,8 @@ async def warmup_router(state: RouterState) -> None:
             )
 
             stats_by_backend[backend_id] = stats_by_backend[backend_id].add_ok(
-                latency_ms=float(obs_latency_ms), total_tokens=int(obs_total_tokens)
+                latency_ms=float(_WARMUP_TRAIN_LATENCY_MS),
+                total_tokens=int(obs_total_tokens),
             )
 
     run_id = f"warmup_{nonce}"
