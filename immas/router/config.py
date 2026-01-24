@@ -79,7 +79,7 @@ class RouterWarmupConfig:
     # Request behavior
     max_concurrency: int = 4
     timeout_s: float = 30.0
-    max_tokens: int = 16
+    max_tokens: int = 1000
 
     # A short marker prepended to the warmup system message. A per-startup nonce
     # is appended at runtime.
@@ -210,7 +210,7 @@ def load_router_app_config(path: str) -> RouterAppConfig:
         warmup_raw.get("timeout_s", 30.0), ctx="router.warmup.timeout_s"
     )
     warmup_max_tokens = _as_int(
-        warmup_raw.get("max_tokens", 16), ctx="router.warmup.max_tokens"
+        warmup_raw.get("max_tokens", 1000), ctx="router.warmup.max_tokens"
     )
     system_prefix = _as_str(
         warmup_raw.get("system_prefix", "IMMAS_WARMUP"),

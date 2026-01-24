@@ -82,7 +82,7 @@ async def run_dialogue(
                     model=model_name,
                     messages=messages,
                     temperature=0,
-                    max_tokens=64,
+                    max_tokens=1000,
                     extra_headers={
                         "X-IMMAS-RUN-ID": run_id,
                         "X-IMMAS-DIALOGUE-ID": dialogue.dialogue_id,
