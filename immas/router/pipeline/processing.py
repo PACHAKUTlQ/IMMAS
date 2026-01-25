@@ -24,7 +24,10 @@ from immas.router.components.performance import (
     PerformanceEvalContext,
     RougeCoqaEvaluator,
     RougeScoreResult,
+    TokenSpanCoqaEvaluator,
+    TokenSpanScoreResult,
 )
+from immas.router.components.performance.normalization import extract_last_nonempty_line
 from immas.router.components.predictor import PredictorInput
 from immas.router.components.prefix_cache import PrefixMatch, match_prefix
 from immas.router.pipeline.routing import (
@@ -139,90 +142,73 @@ async def _maybe_log_detailed_csv(
     pending: PendingChatCompletion,
     forwarded_body: dict[str, Any],
     resp_json: dict[str, Any] | None,
-    rouge: RougeScoreResult | None,
+    perf_details: TokenSpanScoreResult | RougeScoreResult | None,
+    correct: bool,
 ) -> None:
     """
     Best-effort detailed CSV logging.
 
-    Produces a clean row with story/question/gold/answers and ROUGE F1 breakdown.
+    Produces a clean row with context, answers, and performance evaluation details.
+    The logged fields depend on the configured performance evaluator.
+
     Never raises.
     """
     logger = state.detailed_csv_logger
-    if logger is None:
+    if not logger:
         return
 
-    messages = forwarded_body.get("messages")
-    story, question = _extract_story_and_question(messages)
-
-    llm_answer = ""
-    llm_answer_last_line = ""
-    if isinstance(resp_json, dict):
-        assistant = extract_first_assistant_message(resp_json)
-        if assistant is not None:
-            llm_answer = str(assistant.content or "")
-            llm_answer_last_line = RougeCoqaEvaluator.extract_last_nonempty_line(
-                llm_answer
-            )
-
-    gold_answer = rouge.reference_raw if rouge is not None else ""
-
-    rouge_metric_used = ""
-    rouge_used_f1: float | None = None
-    r1: float | None = None
-    r2: float | None = None
-    rl: float | None = None
-
-    if rouge is not None:
-        rouge_metric_used = str(rouge.metric_used)
-        rouge_used_f1 = float(rouge.used_f1)
-        r1 = float(rouge.f1.rouge_1_f1)
-        r2 = float(rouge.f1.rouge_2_f1)
-        rl = float(rouge.f1.rouge_l_f1)
-    else:
-        # If perf evaluator isn't ROUGE but a detailed scorer exists, try to compute.
-        scorer = state.detailed_rouge_scorer
-        if scorer is not None and isinstance(resp_json, dict):
-            try:
-                ctx = PerformanceEvalContext(
-                    run_id=pending.run_id,
-                    dialogue_id=pending.dialogue_id,
-                    turn_number=int(pending.turn_number),
-                    source=pending.source,
-                    request_body=forwarded_body,
-                    response_json=resp_json,
-                )
-                r = scorer.score(ctx)
-                if r is not None:
-                    gold_answer = str(r.reference_raw)
-                    rouge_metric_used = str(r.metric_used)
-                    rouge_used_f1 = float(r.used_f1)
-                    r1 = float(r.f1.rouge_1_f1)
-                    r2 = float(r.f1.rouge_2_f1)
-                    rl = float(r.f1.rouge_l_f1)
-            except Exception:
-                # Best-effort; swallow.
-                return
-
-    row = RouterDetailedCsvRow(
-        source=str(pending.source),
-        dialogue_id=str(pending.dialogue_id),
-        turn_number=int(pending.turn_number),
-        story=str(story),
-        question=str(question),
-        gold_answer=str(gold_answer),
-        llm_answer_last_line=str(llm_answer_last_line),
-        llm_answer=str(llm_answer),
-        rouge_metric_used=str(rouge_metric_used),
-        rouge_used_f1=rouge_used_f1,
-        rouge_1_f1=r1,
-        rouge_2_f1=r2,
-        rouge_l_f1=rl,
-    )
-
     try:
+        messages = forwarded_body.get("messages")
+        story, question = _extract_story_and_question(messages)
+
+        llm_answer = ""
+        llm_answer_last_line = ""
+        if isinstance(resp_json, dict):
+            assistant = extract_first_assistant_message(resp_json)
+            if assistant and assistant.content:
+                llm_answer = str(assistant.content)
+                llm_answer_last_line = extract_last_nonempty_line(llm_answer)
+
+        evaluator_name = state.cfg.router.performance.evaluator
+        gold_answer = ""
+        token_span_matched: bool | None = None
+        rouge_metric_used: str | None = None
+        rouge_used_f1: float | None = None
+        rouge_1_f1: float | None = None
+        rouge_2_f1: float | None = None
+        rouge_l_f1: float | None = None
+
+        if isinstance(perf_details, TokenSpanScoreResult):
+            gold_answer = perf_details.reference_raw
+            token_span_matched = perf_details.matched
+        elif isinstance(perf_details, RougeScoreResult):
+            gold_answer = perf_details.reference_raw
+            rouge_metric_used = str(perf_details.metric_used)
+            rouge_used_f1 = float(perf_details.used_f1)
+            rouge_1_f1 = float(perf_details.f1.rouge_1_f1)
+            rouge_2_f1 = float(perf_details.f1.rouge_2_f1)
+            rouge_l_f1 = float(perf_details.f1.rouge_l_f1)
+
+        row = RouterDetailedCsvRow(
+            source=str(pending.source),
+            dialogue_id=str(pending.dialogue_id),
+            turn_number=int(pending.turn_number),
+            story=story,
+            question=question,
+            gold_answer=gold_answer,
+            llm_answer_last_line=llm_answer_last_line,
+            llm_answer=llm_answer,
+            evaluator=evaluator_name,
+            correct=correct,
+            token_span_matched=token_span_matched,
+            rouge_metric_used=rouge_metric_used,
+            rouge_used_f1=rouge_used_f1,
+            rouge_1_f1=rouge_1_f1,
+            rouge_2_f1=rouge_2_f1,
+            rouge_l_f1=rouge_l_f1,
+        )
         await logger.log(row)
     except Exception:
-        # Logging must never fail the request.
         _log.exception("Failed to enqueue detailed CSV row")
 
 
@@ -307,7 +293,7 @@ async def _process_one_chat_completion(
 
         error: Optional[str] = None
         correct = False
-        rouge_details: RougeScoreResult | None = None
+        perf_details: TokenSpanScoreResult | RougeScoreResult | None = None
 
         resp_json_dict = resp_json if isinstance(resp_json, dict) else None
 
@@ -321,17 +307,15 @@ async def _process_one_chat_completion(
                 response_json=resp_json_dict,
             )
 
-            # Avoid double ROUGE computation: if perf evaluator is ROUGE, use its detailed score.
-            if isinstance(state.perf_evaluator, RougeCoqaEvaluator):
-                rouge_details = state.perf_evaluator.score(ctx)
-                correct = (
-                    bool(rouge_details.correct) if rouge_details is not None else False
-                )
+            # Get detailed score if evaluator supports it, then get correctness.
+            if isinstance(state.perf_evaluator, TokenSpanCoqaEvaluator):
+                perf_details = state.perf_evaluator.score(ctx)
+                correct = bool(perf_details.matched) if perf_details else False
+            elif isinstance(state.perf_evaluator, RougeCoqaEvaluator):
+                perf_details = state.perf_evaluator.score(ctx)
+                correct = bool(perf_details.correct) if perf_details else False
             else:
                 correct = bool(state.perf_evaluator.evaluate(ctx))
-                # If detailed CSV is enabled and has a scorer, compute detailed ROUGE for the CSV.
-                if state.detailed_rouge_scorer is not None:
-                    rouge_details = state.detailed_rouge_scorer.score(ctx)
 
         else:
             error = f"backend_status={status}"
@@ -342,7 +326,8 @@ async def _process_one_chat_completion(
             pending=pending,
             forwarded_body=forwarded_body,
             resp_json=resp_json_dict,
-            rouge=rouge_details,
+            perf_details=perf_details,
+            correct=correct,
         )
 
         evict_prefix_cache = should_evict_router_prefix_cache(

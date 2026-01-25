@@ -62,12 +62,18 @@ class RouterDetailedCsvRow:
     llm_answer_last_line: str
     llm_answer: str
 
-    rouge_metric_used: str
-    rouge_used_f1: float | None
+    evaluator: str
+    correct: bool
 
-    rouge_1_f1: float | None
-    rouge_2_f1: float | None
-    rouge_l_f1: float | None
+    # ROUGE-specific
+    rouge_metric_used: Optional[str] = None
+    rouge_used_f1: Optional[float] = None
+    rouge_1_f1: Optional[float] = None
+    rouge_2_f1: Optional[float] = None
+    rouge_l_f1: Optional[float] = None
+
+    # Token-span-specific
+    token_span_matched: Optional[bool] = None
 
     def to_dict(self) -> Dict[str, str]:
         """
@@ -88,7 +94,10 @@ class RouterDetailedCsvRow:
                 str(d["llm_answer_last_line"])
             ),
             "llm_answer": _sanitize_text_field(str(d["llm_answer"])),
-            "rouge_metric_used": str(d["rouge_metric_used"]),
+            "evaluator": str(d["evaluator"]),
+            "correct": str(bool(d["correct"])),
+            "token_span_matched": str(d.get("token_span_matched") or ""),
+            "rouge_metric_used": str(d.get("rouge_metric_used") or ""),
             "rouge_used_f1": _fmt_f(d.get("rouge_used_f1")),
             "rouge_1_f1": _fmt_f(d.get("rouge_1_f1")),
             "rouge_2_f1": _fmt_f(d.get("rouge_2_f1")),
@@ -105,6 +114,9 @@ FIELDNAMES: tuple[str, ...] = (
     "gold_answer",
     "llm_answer_last_line",
     "llm_answer",
+    "evaluator",
+    "correct",
+    "token_span_matched",
     "rouge_metric_used",
     "rouge_used_f1",
     "rouge_1_f1",
