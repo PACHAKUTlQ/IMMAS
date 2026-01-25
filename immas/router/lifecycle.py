@@ -18,12 +18,14 @@ from immas.common.load import AsyncLoadTracker
 from immas.router.components.backend import HttpOpenAIBackend
 from immas.router.components.batching import MicroBatchInfo, MicroBatcher
 from immas.router.components.logger import AsyncJsonlLogger
+from immas.router.components.performance import AlwaysCorrectEvaluator
 from immas.router.components.predictor import AsyncBackendPredictorPool
 from immas.router.components.prefix_cache import TextPrefixCache
 from immas.router.pipeline.processing import handle_chat_batch
 from immas.router.state import RouterState
 from immas.router.types import PendingChatCompletion
 from immas.router.utils import fail_pending_batch
+from immas.router.warmup import warmup_router
 
 if TYPE_CHECKING:
     from immas.router.config import RouterAppConfig
@@ -33,16 +35,23 @@ _log = logging.getLogger(__name__)
 
 
 @asynccontextmanager
-async def lifespan(app: FastAPI, cfg: RouterAppConfig):
+async def lifespan(app: FastAPI, cfg: "RouterAppConfig"):
     """
     Application lifespan context manager for the router.
 
     Handles startup and shutdown of resources.
     """
 
+    logging.basicConfig(
+        level=logging.INFO, format="[%(levelname)s] %(name)s: %(message)s"
+    )
+
     prefix_cache = TextPrefixCache()
     prefix_cache_lock = asyncio.Lock()
+
+    # Router-global load tracker.
     load_tracker = AsyncLoadTracker(window_s=1.0)
+
     backends = [
         HttpOpenAIBackend(
             backend_id=b.backend_id,
@@ -51,25 +60,39 @@ async def lifespan(app: FastAPI, cfg: RouterAppConfig):
         )
         for b in cfg.backends
     ]
+
     backend_model_by_id = {b.backend_id: b.model for b in cfg.backends}
+    backend_capacity_by_id = {b.backend_id: int(b.capacity) for b in cfg.backends}
+
+    # Per-backend concurrency control + load tracking.
+    backend_semaphores: dict[str, asyncio.Semaphore] = {
+        b.backend_id: asyncio.Semaphore(max(1, int(b.capacity))) for b in cfg.backends
+    }
+    backend_load_trackers: dict[str, AsyncLoadTracker] = {
+        b.backend_id: AsyncLoadTracker(window_s=1.0) for b in cfg.backends
+    }
+
     predictors = AsyncBackendPredictorPool(
         backend_ids=[b.backend_id for b in cfg.backends]
     )
+    perf_evaluator = AlwaysCorrectEvaluator()
+
     rr_lock = asyncio.Lock()
     rr_index = 0
     routing_policy = cfg.router.routing
+
     logger = AsyncJsonlLogger(
         cfg.router.log_path, append=cfg.router.log_append, flush_every=1
     )
     await logger.__aenter__()
+
     inflight_request_tasks: set[asyncio.Task[None]] = set()
 
     # Micro-batcher
     batching_cfg = cfg.router.batching
     if not batching_cfg.enabled:
         raise RuntimeError(
-            "router.batching.enabled is false, but this router version requires batching. "
-            "Set router.batching.enabled: true (or remove the key to use defaults)."
+            "router.batching.enabled is false, but this router version requires batching."
         )
 
     # Use a local reference that is populated before the batcher starts.
@@ -88,13 +111,7 @@ async def lifespan(app: FastAPI, cfg: RouterAppConfig):
 
         st = router_state_ref.get("state")
         if st is None:
-            # Extremely defensive: should not happen because we start the batcher
-            # only after setting router_state_ref["state"].
-            fail_pending_batch(
-                batch,
-                status_code=503,
-                message="Router not ready",
-            )
+            fail_pending_batch(batch, status_code=503, message="Router not ready")
             return
 
         try:
@@ -126,7 +143,11 @@ async def lifespan(app: FastAPI, cfg: RouterAppConfig):
         cfg=cfg,
         backends=backends,
         backend_model_by_id=backend_model_by_id,
+        backend_capacity_by_id=backend_capacity_by_id,
+        backend_semaphores=backend_semaphores,
+        backend_load_trackers=backend_load_trackers,
         predictors=predictors,
+        perf_evaluator=perf_evaluator,
         prefix_cache=prefix_cache,
         prefix_cache_lock=prefix_cache_lock,
         chat_batcher=chat_batcher,
@@ -142,7 +163,15 @@ async def lifespan(app: FastAPI, cfg: RouterAppConfig):
     router_state_ref["state"] = state
     app.state.router_state = state
 
-    # Start batcher only after state is ready.
+    # Warmup backends + bootstrap predictors (no JSONL logging).
+    try:
+        _log.info("Warming up router...")
+        await warmup_router(state)
+    except Exception:
+        # Warmup should never prevent the router from starting.
+        _log.exception("Warmup failed unexpectedly; continuing startup")
+
+    # Start batcher only after warmup and state is ready.
     await chat_batcher.start()
 
     yield

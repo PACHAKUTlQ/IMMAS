@@ -7,8 +7,9 @@ Dataclasses for the router application.
 from __future__ import annotations
 
 import asyncio
+
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Optional
 
 from immas.router.components.backend import HttpOpenAIBackend
 from immas.router.components.logger import RouterBackendScore
@@ -35,18 +36,6 @@ class PendingChatCompletion:
 class PreparedChatCompletion:
     """
     One request prepared at batch level for per-request processing.
-
-    Batch-level responsibilities (already done before creating this object):
-    - serialize prompt
-    - read router prefix cache under one lock
-    - compute per-backend prefix match proxy
-    - compute per-backend predictor outputs
-    - build `backend_scores` list for logging/analysis
-
-    Per-request processing then:
-    - forwards to assigned backend
-    - updates predictor/cache on observed outcome
-    - logs and resolves the future
     """
 
     pending: PendingChatCompletion
@@ -68,3 +57,13 @@ class PreparedChatCompletion:
     # Micro-batching metadata
     batch_id: int
     batch_size: int
+
+    # Auction metadata (meaningful when routing policy is 'auction').
+    routing_policy: str
+    auction_matched: bool
+    auction_total_welfare: float
+    chosen_client_valuation: float
+    chosen_base_cost: float
+    chosen_welfare: float
+    vcg_fee: Optional[float]
+    vcg_total_payment: Optional[float]

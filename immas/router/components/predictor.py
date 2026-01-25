@@ -3,7 +3,7 @@ immas.router.components.predictor
 
 Online predictor for latency/cost/performance.
 
-This module now supports *multiple independent predictors*, one per backend, to
+This module supports *multiple independent predictors*, one per backend, to
 avoid cross-backend interference during online learning.
 
 Key idea
@@ -11,9 +11,10 @@ Key idea
 Each backend gets its own `AgentPredictor` instance. At routing time, the router
 can:
 - compute backend-specific features (notably `kvmatch_text` via the router prefix cache),
+- include router-global and backend-local load features,
 - run *all* backend predictors to obtain per-backend scores,
-- then (for now) still pick one backend via the current policy (round-robin),
-- and update only the chosen backend predictor with observed outcomes.
+- pick a backend via routing policy (e.g., auction),
+- update only the chosen backend predictor with observed outcomes.
 
 Cache ratio
 ----------
@@ -24,6 +25,17 @@ We deterministically set:
 and provide it both:
 - as a logged prediction output ("cache_ratio"), and
 - as an input feature ("pred_cache_ratio") to latency/cost/perf models.
+
+Backend-local load
+------------------
+To allow the predictor to learn backend congestion effects, we include:
+
+- backend_inflight
+- backend_rps_1s
+- backend_capacity
+- backend_utilization := backend_inflight / max(1, backend_capacity)
+
+These are populated from per-backend AsyncLoadTracker snapshots at batch routing time.
 """
 
 from __future__ import annotations
@@ -47,7 +59,14 @@ def _clamp01(x: float) -> float:
 
 @dataclass(frozen=True, slots=True)
 class PredictorInput:
-    """Inputs known at routing time."""
+    """
+    Inputs known at routing time.
+
+    Notes
+    -----
+    `backend_inflight/backend_rps_1s/backend_capacity` are backend-local features.
+    They are critical for enabling the predictor to learn per-backend congestion effects.
+    """
 
     backend_id: str
 
@@ -63,8 +82,14 @@ class PredictorInput:
     # Router-computed proxy for cache reuse (prefix match ratio in [0,1])
     kvmatch_text: float
 
+    # Router-global load snapshot (same for all backends in a batch).
     router_inflight: int = 0
     router_rps_1s: float = 0.0
+
+    # Backend-local load snapshot (varies by backend).
+    backend_inflight: int = 0
+    backend_rps_1s: float = 0.0
+    backend_capacity: int = 1
 
 
 class AgentPredictor:
@@ -92,20 +117,31 @@ class AgentPredictor:
             tree.HoeffdingTreeClassifier(),
         )
 
+    @staticmethod
+    def _utilization(inflight: int, capacity: int) -> float:
+        cap = max(1, int(capacity))
+        return float(max(0, int(inflight))) / float(cap)
+
     def _base_features(self, inp: PredictorInput) -> Features:
+        util = self._utilization(inp.backend_inflight, inp.backend_capacity)
+
         return {
             "bias": 1.0,
-            # NOTE: kept for compatibility; in the new design, each backend
-            # has its own predictor instance, so this feature is constant
-            # per predictor and does not cause cross-backend interference.
+            # Kept for compatibility; per-backend predictors make this constant per model instance.
             "backend_id": inp.backend_id,
             "model": inp.model,
             "source": inp.source,
             "turn_number": float(inp.turn_number),
             "prompt_chars": float(len(inp.prompt_repr)),
             "kvmatch_text": float(inp.kvmatch_text),
+            # Router-global load
             "router_inflight": float(inp.router_inflight),
             "router_rps_1s": float(inp.router_rps_1s),
+            # Backend-local load (critical for congestion-aware predictions)
+            "backend_inflight": float(inp.backend_inflight),
+            "backend_rps_1s": float(inp.backend_rps_1s),
+            "backend_capacity": float(max(1, int(inp.backend_capacity))),
+            "backend_utilization": float(util),
         }
 
     def _pred_cache_ratio(self, inp: PredictorInput) -> float:
