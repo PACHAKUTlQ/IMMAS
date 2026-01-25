@@ -132,20 +132,6 @@ async def lifespan(app: FastAPI, cfg: "RouterAppConfig"):
     else:
         perf_evaluator = AlwaysCorrectEvaluator()
 
-    # Detailed scorer for CSV logging (independent from perf.enabled).
-    detailed_rouge_scorer: Optional[RougeCoqaEvaluator] = None
-    if bool(detailed_cfg.enabled) and ds_index is not None:
-        try:
-            detailed_rouge_scorer = RougeCoqaEvaluator(
-                dataset=ds_index,
-                rouge_metric=str(perf_cfg.rouge_metric),
-                f1_threshold=float(perf_cfg.rouge_f1_threshold),
-                lowercase=bool(perf_cfg.lowercase),
-            )
-        except Exception:
-            _log.exception("Failed to initialize detailed ROUGE scorer; disabling it")
-            detailed_rouge_scorer = None
-
     rr_lock = asyncio.Lock()
     rr_index = 0
     routing_policy = cfg.router.routing
@@ -232,7 +218,6 @@ async def lifespan(app: FastAPI, cfg: "RouterAppConfig"):
         backend_load_trackers=backend_load_trackers,
         predictors=predictors,
         perf_evaluator=perf_evaluator,
-        detailed_rouge_scorer=detailed_rouge_scorer,
         detailed_csv_logger=detailed_csv_logger,
         prefix_cache=prefix_cache,
         prefix_cache_lock=prefix_cache_lock,

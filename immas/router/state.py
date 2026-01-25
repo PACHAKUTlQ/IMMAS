@@ -19,7 +19,6 @@ if TYPE_CHECKING:
     from immas.router.components.batching import MicroBatcher
     from immas.router.components.detailed_csv import AsyncDetailedCsvLogger
     from immas.router.components.logger import AsyncJsonlLogger
-    from immas.router.components.performance import RougeCoqaEvaluator
     from immas.router.components.predictor import AsyncBackendPredictorPool
     from immas.router.components.prefix_cache import TextPrefixCache
     from immas.router.config import RouterAppConfig
@@ -41,8 +40,6 @@ class RouterState:
 
     predictors: "AsyncBackendPredictorPool"
     perf_evaluator: PerformanceEvaluator
-
-    detailed_rouge_scorer: Optional["RougeCoqaEvaluator"]
     detailed_csv_logger: Optional["AsyncDetailedCsvLogger"]
 
     prefix_cache: "TextPrefixCache"
