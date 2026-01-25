@@ -201,6 +201,7 @@ def _write_turns_csv(*, out_path: Path, records: Sequence[Mapping[str, Any]]) ->
     - prompt_tokens progression
     - cached_tokens and cache ratio
     - whether cache reuse aligns with kvmatch_text
+    - cost proxy behavior (pred_cost_tokens vs obs_cost_tokens)
     """
 
     cols = [
@@ -218,11 +219,13 @@ def _write_turns_csv(*, out_path: Path, records: Sequence[Mapping[str, Any]]) ->
         "kvmatch_text",
         "pred_cache_ratio",
         "obs_prompt_tokens",
+        "obs_completion_tokens",
         "obs_cached_tokens",
         "obs_cache_ratio",
         "pred_latency_ms",
         "obs_latency_ms",
         "pred_cost_tokens",
+        "obs_cost_tokens",
         "obs_total_tokens",
         "router_inflight",
         "router_rps_1s",

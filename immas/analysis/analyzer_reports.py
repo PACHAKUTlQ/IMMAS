@@ -84,6 +84,11 @@ def _write_dialogue_summary_csv(
     - latency/cost prediction errors
     - cache reuse summary
     - performance-probability metrics (pred_perf_prob vs correct)
+
+    Notes
+    -----
+    Cost metrics are computed against `obs_cost_tokens`, which is the reconstructed
+    observed cost proxy (price-weighted tokens) when available.
     """
 
     cols = [
@@ -100,10 +105,12 @@ def _write_dialogue_summary_csv(
         "p90_obs_latency_ms",
         "mean_pred_latency_ms",
         "latency_mae_ms",
+        "mean_obs_cost_tokens",
+        "p90_obs_cost_tokens",
+        "mean_pred_cost_tokens",
+        "cost_mae_cost_tokens",
         "mean_obs_total_tokens",
         "p90_obs_total_tokens",
-        "mean_pred_cost_tokens",
-        "cost_mae_tokens",
         "mean_obs_cache_ratio",
         "mean_pred_cache_ratio",
         "corr_cache_vs_latency",
@@ -125,8 +132,11 @@ def _write_dialogue_summary_csv(
         for s in series:
             obs_lat = [x for x in s.obs_latency_ms if _is_finite(x)]
             pred_lat = [x for x in s.pred_latency_ms if _is_finite(x)]
-            obs_total = [float(x) for x in s.obs_total_tokens if _is_finite(float(x))]
+
+            obs_cost = [x for x in s.obs_cost_tokens if _is_finite(x)]
             pred_cost = [x for x in s.pred_cost_tokens if _is_finite(x)]
+
+            obs_total = [float(x) for x in s.obs_total_tokens if _is_finite(float(x))]
 
             obs_cr = [x for x in s.obs_cache_ratio if _is_finite(x)]
             pred_cr = [x for x in s.pred_cache_ratio if _is_finite(x)]
@@ -166,10 +176,12 @@ def _write_dialogue_summary_csv(
                 "p90_obs_latency_ms": quantile(obs_lat, 0.90),
                 "mean_pred_latency_ms": mean(pred_lat),
                 "latency_mae_ms": mae(pred_lat, obs_lat),
+                "mean_obs_cost_tokens": mean(obs_cost),
+                "p90_obs_cost_tokens": quantile(obs_cost, 0.90),
+                "mean_pred_cost_tokens": mean(pred_cost),
+                "cost_mae_cost_tokens": mae(pred_cost, obs_cost),
                 "mean_obs_total_tokens": mean(obs_total),
                 "p90_obs_total_tokens": quantile(obs_total, 0.90),
-                "mean_pred_cost_tokens": mean(pred_cost),
-                "cost_mae_tokens": mae(pred_cost, obs_total),
                 "mean_obs_cache_ratio": mean(obs_cr),
                 "mean_pred_cache_ratio": mean(pred_cr),
                 "corr_cache_vs_latency": corr_cache_lat,
@@ -197,6 +209,10 @@ def _write_backend_summary_csv(
     - backend usage share
     - latency/cost regression errors
     - performance-probability metrics (pred_perf_prob vs correct)
+
+    Notes
+    -----
+    Cost metrics are computed against `obs_cost_tokens` (reconstructed observed cost proxy).
     """
 
     cols = [
@@ -208,9 +224,10 @@ def _write_backend_summary_csv(
         "mean_obs_latency_ms",
         "mean_pred_latency_ms",
         "latency_mae_ms",
-        "mean_obs_total_tokens",
+        "mean_obs_cost_tokens",
         "mean_pred_cost_tokens",
-        "cost_mae_tokens",
+        "cost_mae_cost_tokens",
+        "mean_obs_total_tokens",
         "mean_obs_cache_ratio",
         "perf_n",
         "perf_mean_pred",
@@ -244,6 +261,7 @@ def _write_backend_summary_csv(
             pred_lat: list[float] = []
             obs_cost: list[float] = []
             pred_cost: list[float] = []
+            obs_total: list[float] = []
             obs_cache: list[float] = []
 
             for r in rs:
@@ -253,11 +271,15 @@ def _write_backend_summary_csv(
                     obs_lat.append(ol)
                     pred_lat.append(pl)
 
-                oc = _f(r.get("obs_total_tokens"), math.nan)
+                oc = _f(r.get("obs_cost_tokens"), math.nan)
                 pc = _f(r.get("pred_cost_tokens"), math.nan)
                 if _is_finite(oc) and _is_finite(pc):
                     obs_cost.append(oc)
                     pred_cost.append(pc)
+
+                ot = _f(r.get("obs_total_tokens"), math.nan)
+                if _is_finite(ot):
+                    obs_total.append(ot)
 
                 ocr = _f(r.get("obs_cache_ratio"), math.nan)
                 if _is_finite(ocr):
@@ -275,9 +297,10 @@ def _write_backend_summary_csv(
                 "mean_obs_latency_ms": mean(obs_lat),
                 "mean_pred_latency_ms": mean(pred_lat),
                 "latency_mae_ms": mae(pred_lat, obs_lat),
-                "mean_obs_total_tokens": mean(obs_cost),
+                "mean_obs_cost_tokens": mean(obs_cost),
                 "mean_pred_cost_tokens": mean(pred_cost),
-                "cost_mae_tokens": mae(pred_cost, obs_cost),
+                "cost_mae_cost_tokens": mae(pred_cost, obs_cost),
+                "mean_obs_total_tokens": mean(obs_total),
                 "mean_obs_cache_ratio": mean(obs_cache),
                 "perf_n": perf.n,
                 "perf_mean_pred": perf.mean_pred,

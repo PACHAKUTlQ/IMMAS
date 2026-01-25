@@ -122,6 +122,7 @@ def _build_dialogue_series(
         pred_cache_ratio=[_f(r.get("pred_cache_ratio"), math.nan) for r in per_turn],
         kvmatch_text=[_f(r.get("kvmatch_text"), math.nan) for r in per_turn],
         pred_cost_tokens=[_f(r.get("pred_cost_tokens"), math.nan) for r in per_turn],
+        obs_cost_tokens=[_f(r.get("obs_cost_tokens"), math.nan) for r in per_turn],
         obs_total_tokens=[_i(r.get("obs_total_tokens")) for r in per_turn],
         pred_perf_prob=[_f(r.get("pred_perf_prob"), math.nan) for r in per_turn],
         correct=[bool(r.get("correct", True)) for r in per_turn],

@@ -27,6 +27,12 @@ class DialogueSeries:
     - which backend served which turn,
     - how predictions behaved across turns,
     - whether backend switching affects cache/latency/cost/performance.
+
+    Cost
+    ----
+    `pred_cost_tokens` is the router's cost proxy prediction (arbitrary units).
+    `obs_cost_tokens` is derived during analysis from logged usage fields using
+    per-backend token prices (when available).
     """
 
     dialogue_id: str
@@ -44,6 +50,7 @@ class DialogueSeries:
     kvmatch_text: List[float]
 
     pred_cost_tokens: List[float]
+    obs_cost_tokens: List[float]
     obs_total_tokens: List[int]
 
     pred_perf_prob: List[float]
