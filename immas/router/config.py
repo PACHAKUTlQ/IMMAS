@@ -321,6 +321,12 @@ def load_router_app_config(path: str) -> RouterAppConfig:
     rouge_metric = _as_str(
         perf_raw.get("rouge_metric", "rouge-l"), ctx="router.performance.rouge_metric"
     )
+    if rouge_metric not in ("rouge-1", "rouge-2", "rouge-l"):
+        raise ValueError(
+            "router.performance.rouge_metric must be one of: rouge-1, rouge-2, rouge-l; "
+            f"got {rouge_metric!r}"
+        )
+
     rouge_f1_threshold = _as_float(
         perf_raw.get("rouge_f1_threshold", 0.3),
         ctx="router.performance.rouge_f1_threshold",
