@@ -9,6 +9,7 @@ run_analysis*
 router_run.jsonl
 router_run*
 coqa_run.jsonl
+*.csv
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
