@@ -136,9 +136,7 @@ class RougeCoqaEvaluator:
 
     _WS_RE = re.compile(r"\s+")
     _A_TURN_PREFIX_RE = re.compile(r"^\s*A\s*\d+\s*:\s*", re.IGNORECASE)
-    _FINAL_PREFIX_RE = re.compile(
-        r"^\s*(?:final\s*answer|answer)\s*[:\-]\s*", re.IGNORECASE
-    )
+    _FINAL_PREFIX_RE = re.compile(r"(?i)\b(final\s+)?answer\s*:\s*", re.IGNORECASE)
 
     def __post_init__(self) -> None:
         metric = str(self.rouge_metric).strip().lower()
@@ -178,8 +176,10 @@ class RougeCoqaEvaluator:
         s = cls._A_TURN_PREFIX_RE.sub("", s)
         s = cls._FINAL_PREFIX_RE.sub("", s)
         s = cls._WS_RE.sub(" ", s).strip()
+
         if lowercase:
             s = s.lower()
+
         return s
 
     @staticmethod
