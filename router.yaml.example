@@ -23,9 +23,10 @@ router:
   performance:
     enabled: true
     coqa_split: validation
-    evaluator: rouge
-    rouge_metric: rouge-l
-    rouge_f1_threshold: 0.3
+    evaluator: token_span
+    # evaluator: rouge
+    # rouge_metric: rouge-l
+    # rouge_f1_threshold: 0.3
     lowercase: true
   detailed_csv:
     enabled: false
