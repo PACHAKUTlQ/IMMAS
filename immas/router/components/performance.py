@@ -18,10 +18,16 @@ RougeCoqaEvaluator behavior
   the `rouge` library (https://pypi.org/project/rouge/).
 - Marks `correct=True` if the configured ROUGE metric F1 >= threshold.
 
-Additionally, RougeCoqaEvaluator exposes `score(ctx)` returning:
-- the raw gold answer and last-line hypothesis used for scoring
-- ROUGE-1/2/L F1 scores
-- the used metric and used F1
+Robustness tweaks
+-----------------
+Before ROUGE scoring, both hypothesis and reference are normalized:
+- common answer prefixes removed (e.g., "A3:", "Final Answer:")
+- collapse whitespace
+- optional lowercase
+- remove commas inside digit sequences (e.g., "1,234" -> "1234")
+- *light* number-word to numeral normalization for common cases (e.g., "eight" -> "8",
+  "a hundred" -> "100"). This is intentionally conservative to avoid converting
+  normal prose like "one of the ...".
 """
 
 from __future__ import annotations
@@ -35,6 +41,327 @@ from rouge import Rouge
 
 from immas.data.coqa.loader import CoqaDatasetIndex
 from immas.openai.chat import extract_first_assistant_message
+
+
+# NOTE: intentionally small + conventional. We do not try to be a full English
+# number parser, but we *do* handle the common answer forms that break ROUGE.
+_NUMBER_WORD_INT: dict[str, int] = {
+    "zero": 0,
+    "one": 1,
+    "two": 2,
+    "three": 3,
+    "four": 4,
+    "five": 5,
+    "six": 6,
+    "seven": 7,
+    "eight": 8,
+    "nine": 9,
+    "ten": 10,
+    "eleven": 11,
+    "twelve": 12,
+    "thirteen": 13,
+    "fourteen": 14,
+    "fifteen": 15,
+    "sixteen": 16,
+    "seventeen": 17,
+    "eighteen": 18,
+    "nineteen": 19,
+    "twenty": 20,
+    "thirty": 30,
+    "forty": 40,
+    "fifty": 50,
+    "sixty": 60,
+    "seventy": 70,
+    "eighty": 80,
+    "ninety": 90,
+    "hundred": 100,
+    "thousand": 1000,
+    "million": 1_000_000,
+    "billion": 1_000_000_000,
+}
+
+_NUM_WORDS: frozenset[str] = frozenset(set(_NUMBER_WORD_INT.keys()) | {"point"})
+_NUM_JOINERS: frozenset[str] = frozenset({"and", "a", "an"})
+_NUM_PHRASE_WORDS: frozenset[str] = frozenset(set(_NUM_WORDS) | set(_NUM_JOINERS))
+_SCALES: frozenset[str] = frozenset({"hundred", "thousand", "million", "billion"})
+_UNITS: frozenset[str] = frozenset(
+    {"zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine"}
+)
+_TENS_TEENS: frozenset[str] = frozenset(
+    {
+        "ten",
+        "eleven",
+        "twelve",
+        "thirteen",
+        "fourteen",
+        "fifteen",
+        "sixteen",
+        "seventeen",
+        "eighteen",
+        "nineteen",
+        "twenty",
+        "thirty",
+        "forty",
+        "fifty",
+        "sixty",
+        "seventy",
+        "eighty",
+        "ninety",
+    }
+)
+
+# Used for tokenizing while preserving punctuation and whitespace so we can rebuild
+# the string with minimal distortion.
+_TOKEN_RE = re.compile(r"[A-Za-z]+|[0-9]+(?:\.[0-9]+)?|\s+|[^\w\s]", re.UNICODE)
+
+# Remove comma separators inside digit sequences: "1,234" -> "1234"
+_NUMERIC_COMMA_RE = re.compile(r"(?<=\d),(?=\d)")
+
+# Convert letter-letter hyphen into space so "twenty-one" can be parsed.
+_LETTER_HYPHEN_RE = re.compile(r"(?<=[A-Za-z])[-–](?=[A-Za-z])")
+
+
+def normalize_numbers(text: str) -> str:
+    """
+    Normalize numeric expressions in `text` to improve ROUGE robustness.
+
+    This performs two transformations:
+
+    1) Digit comma stripping
+       - "1,234" -> "1234"
+
+    2) Conservative number-word conversion
+       - converts *common* standalone number answers and scale phrases:
+         "eight" -> "8"
+         "a hundred" -> "100"
+         "one hundred" -> "100"
+         "two thousand" -> "2000"
+         "forty nine" -> "49"
+         "one hundred and five" -> "105"
+         "three point five" -> "3.5"  (decimal part supports unit words only)
+
+    Safety heuristic (important):
+    - If the string contains non-numeric prose (e.g., "one of the ..."), we avoid
+      converting single-token number words like "one". Scale phrases like
+      "a hundred" are still converted inside prose.
+
+    Parameters
+    ----------
+    text
+        Input string.
+
+    Returns
+    -------
+    str
+        Output string with numeric normalization applied.
+    """
+
+    s = str(text or "")
+    if not s:
+        return ""
+
+    # Normalize digit formatting first.
+    s = _NUMERIC_COMMA_RE.sub("", s)
+
+    # Help parse hyphenated number words (e.g., "twenty-one").
+    s = _LETTER_HYPHEN_RE.sub(" ", s)
+
+    # Determine whether this looks like a "numeric-only" answer
+    # If yes, we can be more aggressive converting single-token words.
+    alpha_words = [w.lower() for w in re.findall(r"[A-Za-z]+", s)]
+    numeric_dominant = bool(alpha_words) and all(
+        w in _NUM_PHRASE_WORDS for w in alpha_words
+    )
+
+    tokens = _TOKEN_RE.findall(s)
+    out: list[str] = []
+
+    def _prev_alpha(idx: int) -> str | None:
+        for k in range(idx - 1, -1, -1):
+            t = tokens[k]
+            if t.isalpha():
+                return t.lower()
+        return None
+
+    def _next_alpha(idx: int) -> str | None:
+        for k in range(idx, len(tokens)):
+            t = tokens[k]
+            if t.isalpha():
+                return t.lower()
+        return None
+
+    def _try_parse_number_words(words: list[str]) -> str | None:
+        """
+        Attempt to parse a list of lowercase number-phrase words into a numeral string.
+
+        Returns None if parsing is not possible / not confident.
+        """
+
+        if not words:
+            return None
+
+        # Remove joiner "and". Handle "a/an" only when it clearly stands for "one"
+        # before a scale word (e.g. "a hundred", "an million" (rare)).
+        cleaned: list[str] = []
+        for i, w in enumerate(words):
+            if w == "and":
+                continue
+            if w in {"a", "an"}:
+                nxt = words[i + 1] if i + 1 < len(words) else ""
+                if nxt in _SCALES:
+                    cleaned.append("one")
+                    continue
+                # If it's just "a" (or "an") not tied to a numeric scale, bail.
+                return None
+            cleaned.append(w)
+
+        if not cleaned:
+            return None
+
+        total = 0
+        current = 0
+
+        saw_point = False
+        decimal_digits: list[str] = []
+
+        def _flush_scale(scale: int) -> None:
+            nonlocal total, current
+            if current == 0:
+                current = 1
+            total += current * scale
+            current = 0
+
+        i = 0
+        while i < len(cleaned):
+            w = cleaned[i]
+
+            if w == "point":
+                # Decimal portion: only accept unit words as digits.
+                if saw_point:
+                    return None
+                saw_point = True
+                i += 1
+                continue
+
+            if saw_point:
+                if w not in _UNITS:
+                    return None
+                decimal_digits.append(str(_NUMBER_WORD_INT[w]))
+                i += 1
+                continue
+
+            if w in _UNITS or w in _TENS_TEENS:
+                current += int(_NUMBER_WORD_INT[w])
+                i += 1
+                continue
+
+            if w == "hundred":
+                if current == 0:
+                    current = 1
+                current *= 100
+                i += 1
+                continue
+
+            if w in {"thousand", "million", "billion"}:
+                _flush_scale(int(_NUMBER_WORD_INT[w]))
+                i += 1
+                continue
+
+            # Unknown word in phrase.
+            return None
+
+        value = total + current
+        if saw_point:
+            if not decimal_digits:
+                return None
+            return f"{int(value)}.{''.join(decimal_digits)}"
+        return str(int(value))
+
+    i = 0
+    while i < len(tokens):
+        t = tokens[i]
+        if not t.isalpha():
+            out.append(t)
+            i += 1
+            continue
+
+        w0 = t.lower()
+        if w0 not in _NUM_PHRASE_WORDS:
+            out.append(t)
+            i += 1
+            continue
+
+        # Consume a contiguous numeric word phrase, but *do not* consume trailing
+        # whitespace unless the phrase continues after it.
+        start = i
+        words: list[str] = []
+        j = i
+
+        while j < len(tokens):
+            tj = tokens[j]
+
+            if tj.isalpha():
+                wj = tj.lower()
+                if wj in _NUM_PHRASE_WORDS:
+                    words.append(wj)
+                    j += 1
+                    continue
+                break
+
+            # Only include whitespace/hyphen if the phrase continues with another
+            # numeric phrase word afterwards.
+            if tj.isspace() or tj in {"-", "–"}:
+                k = j + 1
+                while k < len(tokens) and (
+                    tokens[k].isspace() or tokens[k] in {"-", "–"}
+                ):
+                    k += 1
+                if (
+                    k < len(tokens)
+                    and tokens[k].isalpha()
+                    and tokens[k].lower() in _NUM_PHRASE_WORDS
+                ):
+                    j += 1
+                    continue
+                break
+
+            # Any other punctuation breaks the phrase.
+            break
+
+        # j is the first token not in the phrase (or trailing whitespace).
+        parsed = _try_parse_number_words(words)
+
+        prev_word = _prev_alpha(start)
+        next_word = _next_alpha(j)
+
+        contains_scale_or_point = any(w in _SCALES or w == "point" for w in words)
+
+        # Conservative conversion policy:
+        # - always convert numeric-only answers
+        # - convert scale phrases and multi-word phrases
+        # - avoid converting lone "one"/"two"/... inside prose ("one of ...")
+        should_convert = False
+        if parsed is not None:
+            if numeric_dominant:
+                should_convert = True
+            elif contains_scale_or_point or len(words) >= 2:
+                should_convert = True
+            elif len(words) == 1:
+                # Single-token conversions only in safe local contexts.
+                # Specifically avoid "one of ..." and "... of one ..." patterns.
+                w_single = words[0]
+                if w_single in _UNITS or w_single in _TENS_TEENS:
+                    if next_word != "of" and prev_word != "of":
+                        should_convert = True
+
+        if should_convert and parsed is not None:
+            out.append(parsed)
+        else:
+            out.extend(tokens[start:j])
+
+        i = j
+
+    return "".join(out)
 
 
 @dataclass(frozen=True, slots=True)
@@ -97,7 +424,8 @@ class RougeScoreResult:
     Detailed scoring result for one completion.
 
     `hypothesis_last_line_raw` is the last non-empty line of the assistant output,
-    before normalization (prefix stripping, whitespace collapse, optional lowercase).
+    before normalization (prefix stripping, numeric normalization, whitespace collapse,
+    optional lowercase).
     """
 
     hypothesis_last_line_raw: str
@@ -155,7 +483,6 @@ class RougeCoqaEvaluator:
 
         If all lines are empty, returns the stripped full text.
         """
-
         s = str(text or "").replace("\r\n", "\n").replace("\r", "\n")
         lines = s.split("\n")
         for line in reversed(lines):
@@ -168,6 +495,7 @@ class RougeCoqaEvaluator:
         """
         Normalize a single-line answer for ROUGE:
         - strip common prefixes (e.g., "A3:", "Final Answer:")
+        - normalize numeric formatting (number-words + digit commas)
         - collapse whitespace
         - optional lowercase
         """
@@ -175,8 +503,10 @@ class RougeCoqaEvaluator:
         s = str(line or "").strip()
         s = cls._A_TURN_PREFIX_RE.sub("", s)
         s = cls._FINAL_PREFIX_RE.sub("", s)
-        s = cls._WS_RE.sub(" ", s).strip()
 
+        s = normalize_numbers(s)
+
+        s = cls._WS_RE.sub(" ", s).strip()
         if lowercase:
             s = s.lower()
 
