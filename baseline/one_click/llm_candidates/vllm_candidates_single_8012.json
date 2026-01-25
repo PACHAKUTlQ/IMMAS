@@ -1,0 +1,8 @@
+{
+  "Mistral-7B": {
+    "api_endpoint": "http://127.0.0.1:8012/v1",
+    "model": "mistral-7b",
+    "service": "vllm",
+    "size": "7B"
+  }
+}

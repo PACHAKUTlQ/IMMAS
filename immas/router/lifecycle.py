@@ -8,6 +8,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import sys
+
+from pathlib import Path
 
 from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING
@@ -80,6 +83,29 @@ async def lifespan(app: FastAPI, cfg: "RouterAppConfig"):
     rr_lock = asyncio.Lock()
     rr_index = 0
     routing_policy = cfg.router.routing
+    llmrouter_obj = None
+    llmrouter_model_name_to_backend_id: dict[str, str] = {}
+
+    if routing_policy == "llmrouter":
+        lr_cfg = cfg.router.llmrouter
+        if not lr_cfg.name or not lr_cfg.config_path:
+            raise RuntimeError(
+                "router.llmrouter.name and router.llmrouter.config_path are required"
+            )
+
+        repo_root = Path(__file__).resolve().parents[2]
+        llmrouter_dir = repo_root / "baseline" / "LLMRouter"
+        if str(llmrouter_dir) not in sys.path:
+            sys.path.insert(0, str(llmrouter_dir))
+
+        from llmrouter.cli.router_inference import load_router as _load_router  # noqa: WPS433
+
+        llmrouter_obj = _load_router(
+            str(lr_cfg.name),
+            str(lr_cfg.config_path),
+            str(lr_cfg.load_model_path or "") or None,
+        )
+        llmrouter_model_name_to_backend_id = dict(lr_cfg.model_name_to_backend_id)
 
     logger = AsyncJsonlLogger(
         cfg.router.log_path, append=cfg.router.log_append, flush_every=1
@@ -157,6 +183,8 @@ async def lifespan(app: FastAPI, cfg: "RouterAppConfig"):
         routing_policy=routing_policy,
         rr_lock=rr_lock,
         rr_index=rr_index,
+        llmrouter=llmrouter_obj,
+        llmrouter_model_name_to_backend_id=llmrouter_model_name_to_backend_id,
     )
 
     # Publish state before starting background workers.

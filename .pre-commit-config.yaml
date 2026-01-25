@@ -5,6 +5,7 @@ repos:
       - id: check-added-large-files
       - id: check-ast
       - id: check-builtin-literals
+        exclude: ^baseline/LLMRouter/
       - id: check-case-conflict
       - id: check-illegal-windows-names
       - id: check-json
@@ -25,6 +26,8 @@ repos:
         types_or: [python, pyi]
         always_run: true
         args: ["--fix"]
+        exclude: ^baseline/LLMRouter/
       - id: ruff-format
         types_or: [python, pyi]
         always_run: true
+        exclude: ^baseline/LLMRouter/

@@ -1,0 +1,23 @@
+# RandomRouter config for one-click online experiment
+# Uses LLMRouter plugin system: baseline/LLMRouter/custom_routers/randomrouter
+
+# NOTE: MetaRouter resolves relative paths with baseline/LLMRouter as the base
+# directory, so we follow the same convention as other *_online.yaml files.
+
+data_path:
+  # Candidate model mapping for routing (must match one_click llm_candidates_path)
+  llm_data: '../one_click/llm_candidates/vllm_candidates.json'
+
+  # Optional fields (kept for MetaRouter compatibility)
+  query_data_test: 'data/example_data/query_data/default_query_test.jsonl'
+  routing_data_test: 'data/example_data/routing_data/default_routing_test_data.jsonl'
+
+metric:
+  weights:
+    performance: 1
+    cost: 0
+    llm_judge: 0
+
+hparam:
+  #seed: 42
+  seed: null

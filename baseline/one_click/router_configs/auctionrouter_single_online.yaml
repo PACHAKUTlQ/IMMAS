@@ -1,0 +1,38 @@
+# AuctionRouter config for one-click online experiment (single model)
+# Uses LLMRouter plugin system: baseline/LLMRouter/custom_routers/auctionrouter
+
+data_path:
+  llm_data: '../one_click/llm_candidates/vllm_candidates_single_8012.json'
+
+  # Optional fields (kept for MetaRouter compatibility)
+  query_data_test: 'data/example_data/query_data/default_query_test.jsonl'
+  routing_data_test: 'data/example_data/routing_data/default_routing_test_data.jsonl'
+
+metric:
+  weights:
+    performance: 1
+    cost: 0
+    llm_judge: 0
+
+hparam:
+  # Auction params
+  delta_default: 0.5
+  quality_scale: 100.0
+  latency_scale: 5.0
+  cost_scale: 0.02
+  min_welfare_edge: 0.0
+  mcmf_scale: 1000
+
+  # Heuristics for predicted latency/perf/cost
+  size_default_b: 7.0
+  perf_base: 0.55
+  perf_per_b: 0.005
+  perf_min: 0.45
+  perf_max: 0.95
+  latency_base_ms: 400.0
+  latency_per_b_ms: 12.0
+  cost_tokens_per_b: 80.0
+
+  # Capacity hints for auction (optional)
+  capacity_default: 1
+  capacity_by_llm: {}

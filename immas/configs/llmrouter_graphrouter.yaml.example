@@ -1,0 +1,43 @@
+router:
+  log_path: router_run.jsonl
+  log_append: false
+  routing: llmrouter
+  warmup:
+    enabled: true
+    max_dialogues: 1
+    max_turns_per_dialogue: 2
+    max_concurrency: 4
+    timeout_s: 30.0
+    max_tokens: 64
+  batching:
+    enabled: true
+    max_batch_size: 16
+    max_wait_ms: 10.0
+    max_queue_size: 4096
+  auction:
+    delta_default: 0.5
+    min_welfare_edge: 0.0
+    mcmf_scale: 1000
+    quality_scale: 100.0
+    latency_scale: 5.0
+    cost_scale: 0.02
+  llmrouter:
+    name: "graphrouter"
+    config_path: "baseline/one_click/router_configs/graphrouter_online.yaml"
+    load_model_path: "baseline/LLMRouter/llmrouter/saved_models/graphrouter/graphrouter_oneclick_demo.pt"
+    model_name_to_backend_id:
+      Mistral-7B: b0
+      Qwen2.5-7b: b1
+
+backends:
+  - id: b0
+    base_url_v1: http://127.0.0.1:8012/v1
+    api_key: sk-local
+    model: mistral-7b
+    capacity: 4
+
+  - id: b1
+    base_url_v1: http://127.0.0.1:8013/v1
+    api_key: sk-local
+    model: qwen2.5-7b
+    capacity: 4

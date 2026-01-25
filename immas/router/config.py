@@ -23,7 +23,7 @@ from immas.router.utils import (
     _as_str,
 )
 
-RoutingPolicy = Literal["round_robin", "auction"]
+RoutingPolicy = Literal["round_robin", "auction", "llmrouter"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -115,6 +115,18 @@ class RouterAuctionConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class RouterLLMRouterConfig:
+    """
+    LLMRouter integration settings.
+    """
+
+    name: str = ""
+    config_path: str = ""
+    load_model_path: str = ""
+    model_name_to_backend_id: dict[str, str] = field(default_factory=dict)
+
+
+@dataclass(frozen=True, slots=True)
 class RouterConfig:
     """Router settings."""
 
@@ -124,6 +136,7 @@ class RouterConfig:
     batching: RouterBatchingConfig = field(default_factory=RouterBatchingConfig)
     warmup: RouterWarmupConfig = field(default_factory=RouterWarmupConfig)
     auction: RouterAuctionConfig = field(default_factory=RouterAuctionConfig)
+    llmrouter: RouterLLMRouterConfig = field(default_factory=RouterLLMRouterConfig)
 
 
 @dataclass(frozen=True, slots=True)
@@ -152,7 +165,7 @@ def load_router_app_config(path: str) -> RouterAppConfig:
         _as_str(router_raw.get("routing", "round_robin"), ctx="router.routing")
         or "round_robin"
     )
-    if routing_raw not in ("round_robin", "auction"):
+    if routing_raw not in ("round_robin", "auction", "llmrouter"):
         raise ValueError(f"Unsupported routing policy: {routing_raw!r}")
     routing = cast(RoutingPolicy, routing_raw)
 
@@ -308,6 +321,28 @@ def load_router_app_config(path: str) -> RouterAppConfig:
     if not backends:
         raise ValueError("Config must contain at least one backend in `backends:`")
 
+    llmrouter_raw = _as_mapping(
+        router_raw.get("llmrouter", {}), ctx="root.router.llmrouter"
+    )
+    llmrouter_name = _as_str(llmrouter_raw.get("name", ""), ctx="router.llmrouter.name")
+    llmrouter_config_path = _as_str(
+        llmrouter_raw.get("config_path", ""), ctx="router.llmrouter.config_path"
+    )
+    llmrouter_load_model_path = _as_str(
+        llmrouter_raw.get("load_model_path", ""),
+        ctx="router.llmrouter.load_model_path",
+    )
+
+    llmrouter_map_raw = _as_mapping(
+        llmrouter_raw.get("model_name_to_backend_id", {}),
+        ctx="router.llmrouter.model_name_to_backend_id",
+    )
+    llmrouter_map: dict[str, str] = {}
+    for k, v in llmrouter_map_raw.items():
+        llmrouter_map[
+            _as_str(k, ctx="router.llmrouter.model_name_to_backend_id.key")
+        ] = _as_str(v, ctx="router.llmrouter.model_name_to_backend_id.value")
+
     return RouterAppConfig(
         router=RouterConfig(
             log_path=log_path,
@@ -339,6 +374,12 @@ def load_router_app_config(path: str) -> RouterAppConfig:
                 min_welfare_edge=float(min_welfare_edge),
                 mcmf_scale=int(mcmf_scale),
                 congestion_penalty=float(congestion_penalty),
+            ),
+            llmrouter=RouterLLMRouterConfig(
+                name=str(llmrouter_name),
+                config_path=str(llmrouter_config_path),
+                load_model_path=str(llmrouter_load_model_path),
+                model_name_to_backend_id=dict(llmrouter_map),
             ),
         ),
         backends=backends,

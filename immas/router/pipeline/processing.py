@@ -67,6 +67,36 @@ def _find_chosen_backend_score(
     return None
 
 
+def _format_messages_as_prompt(messages: list[dict[str, Any]] | None) -> str:
+    if not messages:
+        return ""
+    lines: list[str] = []
+    for m in messages:
+        role = (m.get("role") or "user").strip().lower()
+        content = (m.get("content") or "").strip()
+        if not content:
+            continue
+        if role == "system":
+            lines.append(f"[System]\n{content}")
+        elif role == "assistant":
+            lines.append(f"Assistant: {content}")
+        else:
+            lines.append(f"User: {content}")
+    if not lines:
+        return ""
+    if not lines[-1].startswith("User:"):
+        return "\n".join(lines)
+    return "\n".join(lines) + "\nAssistant:"
+
+
+def _extract_llmrouter_model_name(result: dict[str, Any]) -> str:
+    return (
+        str(result.get("model_name") or "")
+        or str(result.get("predicted_llm") or "")
+        or str(result.get("predicted_llm_name") or "")
+    ).strip()
+
+
 async def _process_one_chat_completion(
     prep: PreparedChatCompletion, *, state: RouterState
 ) -> None:
@@ -289,12 +319,14 @@ async def handle_chat_batch(
 
     # Serialize prompts (fail individual bad requests early).
     prompt_repr_by_i: list[str | None] = [None] * len(batch)
+    prompt_text_by_i: list[str | None] = [None] * len(batch)
     prompt_chars_by_i: list[int] = [0] * len(batch)
 
     for i, pending in enumerate(batch):
         try:
             messages = pending.body.get("messages")
             pr = serialize_chat_messages(messages)
+            prompt_text = _format_messages_as_prompt(messages)
         except Exception:
             try_set_future_result(
                 pending.future,
@@ -302,6 +334,7 @@ async def handle_chat_batch(
             )
             continue
         prompt_repr_by_i[i] = pr
+        prompt_text_by_i[i] = prompt_text
         prompt_chars_by_i[i] = int(len(pr))
 
     # Read cached texts under one lock: cached_text[i][backend_id] -> str|None
@@ -478,6 +511,64 @@ async def handle_chat_batch(
         auction_total_welfare = float(dec.auction_total_welfare)
         vcg_fee_by_i = dec.vcg_fee_by_i
         vcg_pay_by_i = dec.vcg_total_payment_by_i
+    elif state.routing_policy == "llmrouter":
+        if state.llmrouter is None:
+            fail_pending_batch(batch, status_code=503, message="LLMRouter not ready")
+            return
+
+        async def _route_one(i: int) -> tuple[int, str]:
+            prompt_text = prompt_text_by_i[i] or ""
+            if not prompt_text:
+                return i, ""
+            result = await asyncio.to_thread(
+                state.llmrouter.route_single, {"query": prompt_text}
+            )
+            if not isinstance(result, dict):
+                return i, ""
+            return i, _extract_llmrouter_model_name(result)
+
+        llmrouter_results = await asyncio.gather(
+            *[_route_one(i) for i in active_indices], return_exceptions=False
+        )
+
+        name_to_backend = state.llmrouter_model_name_to_backend_id
+
+        for i, model_name in llmrouter_results:
+            if not model_name:
+                try_set_future_result(
+                    batch[i].future,
+                    (503, {"error": {"message": "LLMRouter returned empty model"}}),
+                )
+                continue
+            backend_id = name_to_backend.get(model_name) or (
+                model_name if model_name in backend_ids else ""
+            )
+            if not backend_id:
+                try_set_future_result(
+                    batch[i].future,
+                    (
+                        503,
+                        {
+                            "error": {
+                                "message": f"LLMRouter model '{model_name}' not mapped to backend"
+                            }
+                        },
+                    ),
+                )
+                continue
+            backend = next(
+                (b for b in state.backends if b.backend_id == backend_id), None
+            )
+            if backend is None:
+                try_set_future_result(
+                    batch[i].future,
+                    (
+                        503,
+                        {"error": {"message": f"No backend for id '{backend_id}'"}},
+                    ),
+                )
+                continue
+            assigned_by_i[i] = backend
     else:
         chosen = await select_backends_round_robin(state, len(active_indices))
         for idx, backend in zip(active_indices, chosen):

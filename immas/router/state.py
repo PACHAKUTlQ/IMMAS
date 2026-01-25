@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 
 from dataclasses import dataclass
+from typing import Any
 from typing import TYPE_CHECKING
 
 from immas.router.components.performance import PerformanceEvaluator
@@ -52,3 +53,6 @@ class RouterState:
     routing_policy: str
     rr_lock: asyncio.Lock
     rr_index: int
+
+    llmrouter: Any
+    llmrouter_model_name_to_backend_id: dict[str, str]

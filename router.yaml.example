@@ -21,6 +21,14 @@ router:
     latency_scale: 5.0
     cost_scale: 0.02
 
+  llmrouter:
+    name: "randomrouter"
+    config_path: "baseline/one_click/router_configs/randomrouter_online.yaml"
+    load_model_path: ""
+    model_name_to_backend_id:
+      Mistral-7B: b0
+      Qwen2.5-7b: b1
+
 backends:
   - id: b0
     base_url_v1: http://127.0.0.1:8000/v1
