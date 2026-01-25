@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Optional
 
 from immas.router.components.performance import PerformanceEvaluator
+from immas.router.pricing import BackendTokenPrices
 
 if TYPE_CHECKING:
     from immas.common.load import AsyncLoadTracker
@@ -37,6 +38,9 @@ class RouterState:
     backend_capacity_by_id: dict[str, int]
     backend_semaphores: dict[str, asyncio.Semaphore]
     backend_load_trackers: dict[str, "AsyncLoadTracker"]
+
+    # Backend token pricing used for observed cost computation.
+    backend_prices_by_id: dict[str, BackendTokenPrices]
 
     predictors: "AsyncBackendPredictorPool"
     perf_evaluator: PerformanceEvaluator

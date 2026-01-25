@@ -28,6 +28,7 @@ from immas.router.components.performance import (
 from immas.router.components.predictor import AsyncBackendPredictorPool
 from immas.router.components.prefix_cache import TextPrefixCache
 from immas.router.pipeline.processing import handle_chat_batch
+from immas.router.pricing import BackendTokenPrices
 from immas.router.state import RouterState
 from immas.router.types import PendingChatCompletion
 from immas.router.utils import fail_pending_batch
@@ -69,6 +70,15 @@ async def lifespan(app: FastAPI, cfg: "RouterAppConfig"):
 
     backend_model_by_id = {b.backend_id: b.model for b in cfg.backends}
     backend_capacity_by_id = {b.backend_id: int(b.capacity) for b in cfg.backends}
+
+    backend_prices_by_id: dict[str, BackendTokenPrices] = {
+        b.backend_id: BackendTokenPrices(
+            input_token_price=float(b.input_token_price),
+            cached_input_token_price=float(b.cached_input_token_price),
+            output_token_price=float(b.output_token_price),
+        )
+        for b in cfg.backends
+    }
 
     # Per-backend concurrency control + load tracking.
     backend_semaphores: dict[str, asyncio.Semaphore] = {
@@ -216,6 +226,7 @@ async def lifespan(app: FastAPI, cfg: "RouterAppConfig"):
         backend_capacity_by_id=backend_capacity_by_id,
         backend_semaphores=backend_semaphores,
         backend_load_trackers=backend_load_trackers,
+        backend_prices_by_id=backend_prices_by_id,
         predictors=predictors,
         perf_evaluator=perf_evaluator,
         detailed_csv_logger=detailed_csv_logger,
