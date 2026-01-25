@@ -15,10 +15,14 @@ from typing import TYPE_CHECKING
 from fastapi import FastAPI
 
 from immas.common.load import AsyncLoadTracker
+from immas.data.coqa.loader import CoqaDatasetIndex
 from immas.router.components.backend import HttpOpenAIBackend
 from immas.router.components.batching import MicroBatchInfo, MicroBatcher
 from immas.router.components.logger import AsyncJsonlLogger
-from immas.router.components.performance import AlwaysCorrectEvaluator
+from immas.router.components.performance import (
+    AlwaysCorrectEvaluator,
+    RougeCoqaEvaluator,
+)
 from immas.router.components.predictor import AsyncBackendPredictorPool
 from immas.router.components.prefix_cache import TextPrefixCache
 from immas.router.pipeline.processing import handle_chat_batch
@@ -75,7 +79,32 @@ async def lifespan(app: FastAPI, cfg: "RouterAppConfig"):
     predictors = AsyncBackendPredictorPool(
         backend_ids=[b.backend_id for b in cfg.backends]
     )
-    perf_evaluator = AlwaysCorrectEvaluator()
+
+    # Performance evaluator: placeholder vs real dataset-backed (ROUGE) evaluation.
+    perf_cfg = cfg.router.performance
+    if bool(perf_cfg.enabled):
+        try:
+            _log.info(
+                "Initializing ROUGE(CoQA) performance evaluator: split=%s metric=%s thr=%.3f",
+                perf_cfg.coqa_split,
+                perf_cfg.rouge_metric,
+                perf_cfg.rouge_f1_threshold,
+            )
+            ds_index = CoqaDatasetIndex.from_hf(split=str(perf_cfg.coqa_split))
+            perf_evaluator = RougeCoqaEvaluator(
+                dataset=ds_index,
+                rouge_metric=str(perf_cfg.rouge_metric),
+                f1_threshold=float(perf_cfg.rouge_f1_threshold),
+                lowercase=bool(perf_cfg.lowercase),
+            )
+        except Exception:
+            # Never block router startup on perf eval initialization.
+            _log.exception(
+                "Failed to initialize ROUGE(CoQA) evaluator; falling back to AlwaysCorrectEvaluator"
+            )
+            perf_evaluator = AlwaysCorrectEvaluator()
+    else:
+        perf_evaluator = AlwaysCorrectEvaluator()
 
     rr_lock = asyncio.Lock()
     rr_index = 0
