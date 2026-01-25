@@ -24,6 +24,7 @@ from immas.router.utils import (
 )
 
 RoutingPolicy = Literal["round_robin", "auction"]
+PerformanceEvaluatorKind = Literal["rouge", "token_span"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -92,17 +93,30 @@ class RouterPerformanceConfig:
     Online performance evaluation configuration.
 
     When enabled, the router computes a real-time `correct` signal using the CoQA
-    dataset gold answers and ROUGE. When disabled, the router uses a placeholder
-    evaluator (AlwaysCorrectEvaluator) because in real non-dataset traffic the
-    gold answer may be unknown at routing time.
+    dataset gold answers.
+
+    Evaluators
+    ----------
+    - rouge: dataset-backed evaluation using ROUGE between gold answer and the model's
+      extracted last-line answer.
+    - token_span: dataset-backed token-span substring match (fast, deterministic),
+      on the same "last line" answer after numeric normalization.
+
+    Notes
+    -----
+    When disabled, the router uses AlwaysCorrectEvaluator (placeholder) because in
+    real non-dataset traffic the gold answer may be unknown at routing time.
     """
 
     enabled: bool = False
 
+    # Which evaluator to use when enabled.
+    evaluator: PerformanceEvaluatorKind = "rouge"
+
     # Dataset split to load for gold answers.
     coqa_split: str = "validation"
 
-    # ROUGE metric and threshold for correctness.
+    # ROUGE metric and threshold for correctness (used when evaluator="rouge").
     rouge_metric: str = "rouge-l"  # "rouge-1" | "rouge-2" | "rouge-l"
     rouge_f1_threshold: float = 0.3
     lowercase: bool = True
@@ -290,6 +304,17 @@ def load_router_app_config(path: str) -> RouterAppConfig:
     perf_enabled = _as_bool(
         perf_raw.get("enabled", False), ctx="router.performance.enabled"
     )
+    perf_evaluator_raw = (
+        _as_str(perf_raw.get("evaluator", "rouge"), ctx="router.performance.evaluator")
+        or "rouge"
+    ).lower()
+    if perf_evaluator_raw not in ("rouge", "token_span"):
+        raise ValueError(
+            "router.performance.evaluator must be one of: rouge, token_span; "
+            f"got {perf_evaluator_raw!r}"
+        )
+    perf_evaluator = cast(PerformanceEvaluatorKind, perf_evaluator_raw)
+
     perf_coqa_split = _as_str(
         perf_raw.get("coqa_split", "validation"), ctx="router.performance.coqa_split"
     )
@@ -428,6 +453,7 @@ def load_router_app_config(path: str) -> RouterAppConfig:
             ),
             performance=RouterPerformanceConfig(
                 enabled=bool(perf_enabled),
+                evaluator=perf_evaluator,
                 coqa_split=str(perf_coqa_split or "validation"),
                 rouge_metric=str(rouge_metric or "rouge-l"),
                 rouge_f1_threshold=float(rouge_f1_threshold),
