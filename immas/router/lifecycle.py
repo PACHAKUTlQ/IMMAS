@@ -23,6 +23,7 @@ from immas.router.components.logger import AsyncJsonlLogger
 from immas.router.components.performance import (
     AlwaysCorrectEvaluator,
     RougeCoqaEvaluator,
+    TokenSpanCoqaEvaluator,
 )
 from immas.router.components.predictor import AsyncBackendPredictorPool
 from immas.router.components.prefix_cache import TextPrefixCache
@@ -81,7 +82,7 @@ async def lifespan(app: FastAPI, cfg: "RouterAppConfig"):
         backend_ids=[b.backend_id for b in cfg.backends]
     )
 
-    # Performance evaluator: placeholder vs real dataset-backed (ROUGE) evaluation.
+    # Performance evaluator: placeholder vs dataset-backed evaluation.
     perf_cfg = cfg.router.performance
     detailed_cfg = cfg.router.detailed_csv
 
@@ -96,25 +97,36 @@ async def lifespan(app: FastAPI, cfg: "RouterAppConfig"):
             _log.exception("Failed to load CoQA dataset index; continuing without it")
             ds_index = None
 
-    # Performance evaluator: placeholder vs dataset-backed (ROUGE) evaluation.
+    # Performance evaluator: placeholder vs dataset-backed.
     if bool(perf_cfg.enabled) and ds_index is not None:
         try:
-            _log.info(
-                "Initializing ROUGE(CoQA) performance evaluator: split=%s metric=%s thr=%.3f",
-                perf_cfg.coqa_split,
-                perf_cfg.rouge_metric,
-                perf_cfg.rouge_f1_threshold,
-            )
-            perf_evaluator = RougeCoqaEvaluator(
-                dataset=ds_index,
-                rouge_metric=str(perf_cfg.rouge_metric),
-                f1_threshold=float(perf_cfg.rouge_f1_threshold),
-                lowercase=bool(perf_cfg.lowercase),
-            )
+            evaluator = str(getattr(perf_cfg, "evaluator", "rouge") or "rouge").lower()
+            if evaluator == "token_span":
+                _log.info(
+                    "Initializing TokenSpan(CoQA) performance evaluator: split=%s",
+                    perf_cfg.coqa_split,
+                )
+                perf_evaluator = TokenSpanCoqaEvaluator(
+                    dataset=ds_index,
+                    lowercase=bool(perf_cfg.lowercase),
+                )
+            else:
+                _log.info(
+                    "Initializing ROUGE(CoQA) performance evaluator: split=%s metric=%s thr=%.3f",
+                    perf_cfg.coqa_split,
+                    perf_cfg.rouge_metric,
+                    perf_cfg.rouge_f1_threshold,
+                )
+                perf_evaluator = RougeCoqaEvaluator(
+                    dataset=ds_index,
+                    rouge_metric=str(perf_cfg.rouge_metric),
+                    f1_threshold=float(perf_cfg.rouge_f1_threshold),
+                    lowercase=bool(perf_cfg.lowercase),
+                )
         except Exception:
             # Never block router startup on perf eval initialization.
             _log.exception(
-                "Failed to initialize ROUGE(CoQA) evaluator; falling back to AlwaysCorrectEvaluator"
+                "Failed to initialize performance evaluator; falling back to AlwaysCorrectEvaluator"
             )
             perf_evaluator = AlwaysCorrectEvaluator()
     else:
