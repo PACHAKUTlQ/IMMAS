@@ -64,22 +64,24 @@ def _write_plots(
     obs_cached_tokens_all = _safe_int_series(ok_by_end, "obs_cached_tokens")
 
     pred_perf_prob_all = _safe_float_series(ok_by_end, "pred_perf_prob")
-    correct_all = [bool(r.get("correct", True)) for r in ok_by_end]
-    correct_all_float = [1.0 if c else 0.0 for c in correct_all]
+    correct_all: list[bool] = [bool(r.get("correct", True)) for r in ok_by_end]
+    correct_all_float: list[float] = [1.0 if c else 0.0 for c in correct_all]
 
     # Backend usage (categorical)
-    backend_ids = [_s(r.get("backend_id")) or "backend_unknown" for r in ok_by_end]
+    backend_ids: list[str] = [
+        _s(r.get("backend_id")) or "backend_unknown" for r in ok_by_end
+    ]
     backend_counts: dict[str, int] = {}
     for bid in backend_ids:
         backend_counts[bid] = backend_counts.get(bid, 0) + 1
 
-    obs_lat_finite = [x for x in obs_lat if _is_finite(x)]
-    obs_cr_finite = [x for x in obs_cache_ratio_all if _is_finite(x)]
+    obs_lat_finite: list[float] = [x for x in obs_lat if _is_finite(x)]
+    obs_cr_finite: list[float] = [x for x in obs_cache_ratio_all if _is_finite(x)]
 
     # -------------------------------------------------------------------------
     # completion-order evolution plots
     # -------------------------------------------------------------------------
-    xs_all = list(range(len(ok_by_end)))
+    xs_all: list[int] = list(range(len(ok_by_end)))
 
     # Time series: latency
     plt.figure(figsize=(12, 5))
@@ -492,7 +494,9 @@ def _write_plots(
         plt.savefig(outdir / "per_turn_profiles.png", dpi=160)
         plt.close()
 
-    # Per-dialogue trace plots
+    # -------------------------------------------------------------------------
+    # Per-dialogue trace plots (now includes latency per dialogue)
+    # -------------------------------------------------------------------------
     must_include: set[str] = set()
     for r in top_lat:
         must_include.add(_s(r.get("dialogue_id")))
@@ -505,7 +509,9 @@ def _write_plots(
     )
 
     selected: list[DialogueSeries] = []
-    did_to_series = {s.dialogue_id: s for s in candidates_sorted}
+    did_to_series: dict[str, DialogueSeries] = {
+        s.dialogue_id: s for s in candidates_sorted
+    }
 
     for did in sorted(must_include):
         s = did_to_series.get(did)
@@ -522,7 +528,7 @@ def _write_plots(
         selected_ids.add(s.dialogue_id)
 
     def _plot_dialogue_trace(s: DialogueSeries, out_path: Path) -> None:
-        xs = s.turns
+        xs: list[int] = s.turns
 
         # map backend_id strings to small integers for plotting
         backend_order: list[str] = []
@@ -535,12 +541,18 @@ def _write_plots(
             backend_idx.append(backend_to_idx[b])
 
         corr_cl = _pearsonr_finite(s.obs_cache_ratio, s.obs_latency_ms)
+
+        obs_lat_f: list[float] = [x for x in s.obs_latency_ms if _is_finite(float(x))]
+        mean_lat = float(sum(obs_lat_f) / len(obs_lat_f)) if obs_lat_f else math.nan
+        p90_lat = quantile(obs_lat_f, 0.90) if obs_lat_f else math.nan
+
         sid = _short_id(s.dialogue_id, 24)
         backend_ids_joined = ",".join(sorted(set(s.backend_id)))
 
-        plt.figure(figsize=(12, 15))
+        # Added one panel for latency (obs vs pred): 6 panels total.
+        plt.figure(figsize=(12, 18))
 
-        ax0 = plt.subplot(5, 1, 1)
+        ax0 = plt.subplot(6, 1, 1)
         ax0.step(xs, backend_idx, where="mid", linewidth=1.5)
         ax0.set_ylabel("backend")
         if backend_order:
@@ -548,7 +560,7 @@ def _write_plots(
             ax0.set_yticklabels(backend_order)
         ax0.grid(True, alpha=0.25)
 
-        ax1 = plt.subplot(5, 1, 2, sharex=ax0)
+        ax1 = plt.subplot(6, 1, 2, sharex=ax0)
         ax1.plot(
             xs, s.obs_cache_ratio, marker="o", label="obs_cache_ratio", linewidth=1.8
         )
@@ -565,30 +577,47 @@ def _write_plots(
         ax1.legend(loc="best")
         ax1.grid(True, alpha=0.25)
 
-        ax2 = plt.subplot(5, 1, 3, sharex=ax0)
+        # New: latency per dialogue (obs vs pred)
+        ax2 = plt.subplot(6, 1, 3, sharex=ax0)
         ax2.plot(
+            xs, s.obs_latency_ms, marker="o", label="obs_latency_ms", linewidth=1.8
+        )
+        ax2.plot(
+            xs,
+            s.pred_latency_ms,
+            marker="o",
+            label="pred_latency_ms",
+            linewidth=1.2,
+            alpha=0.85,
+        )
+        ax2.set_ylabel("ms")
+        ax2.legend(loc="best")
+        ax2.grid(True, alpha=0.25)
+
+        ax3 = plt.subplot(6, 1, 4, sharex=ax0)
+        ax3.plot(
             xs,
             s.obs_prompt_tokens,
             marker="o",
             label="obs_prompt_tokens",
             linewidth=1.5,
         )
-        ax2.plot(
+        ax3.plot(
             xs,
             s.obs_cached_tokens,
             marker="o",
             label="obs_cached_tokens",
             linewidth=1.5,
         )
-        ax2.set_ylabel("tokens")
-        ax2.legend(loc="best")
-        ax2.grid(True, alpha=0.25)
+        ax3.set_ylabel("tokens")
+        ax3.legend(loc="best")
+        ax3.grid(True, alpha=0.25)
 
-        ax3 = plt.subplot(5, 1, 4, sharex=ax0)
-        ax3.plot(
+        ax4 = plt.subplot(6, 1, 5, sharex=ax0)
+        ax4.plot(
             xs, s.obs_total_tokens, marker="o", label="obs_total_tokens", linewidth=1.8
         )
-        ax3.plot(
+        ax4.plot(
             xs,
             s.pred_cost_tokens,
             marker="o",
@@ -596,16 +625,16 @@ def _write_plots(
             linewidth=1.2,
             alpha=0.85,
         )
-        ax3.set_ylabel("tokens")
-        ax3.legend(loc="best")
-        ax3.grid(True, alpha=0.25)
+        ax4.set_ylabel("tokens")
+        ax4.legend(loc="best")
+        ax4.grid(True, alpha=0.25)
 
-        ax4 = plt.subplot(5, 1, 5, sharex=ax0)
-        correct_float = [1.0 if c else 0.0 for c in s.correct]
-        ax4.plot(
+        ax5 = plt.subplot(6, 1, 6, sharex=ax0)
+        correct_float: list[float] = [1.0 if c else 0.0 for c in s.correct]
+        ax5.plot(
             xs, s.pred_perf_prob, marker="o", label="pred_perf_prob", linewidth=1.5
         )
-        ax4.plot(
+        ax5.plot(
             xs,
             correct_float,
             marker="o",
@@ -613,17 +642,18 @@ def _write_plots(
             linewidth=1.0,
             alpha=0.7,
         )
-        ax4.set_xlabel("turn_number")
-        ax4.set_ylabel("prob / label")
-        ax4.set_ylim(-0.05, 1.05)
-        ax4.legend(loc="best")
-        ax4.grid(True, alpha=0.25)
+        ax5.set_xlabel("turn_number")
+        ax5.set_ylabel("prob / label")
+        ax5.set_ylim(-0.05, 1.05)
+        ax5.legend(loc="best")
+        ax5.grid(True, alpha=0.25)
 
-        plt.suptitle(
+        title = (
             f"Dialogue trace did={sid} turns={len(xs)} backends={backend_ids_joined} "
-            f"corr(cache,lat)={corr_cl:.3f}",
-            y=0.995,
+            f"mean_lat={mean_lat:.1f}ms p90_lat={p90_lat:.1f}ms "
+            f"corr(cache,lat)={corr_cl:.3f}"
         )
+        plt.suptitle(title, y=0.995)
         plt.tight_layout(rect=(0, 0, 1, 0.975))
         plt.savefig(out_path, dpi=160)
         plt.close()
@@ -636,7 +666,5 @@ def _write_plots(
     print(f"\nWrote plots to: {outdir.resolve()}")
     if selected:
         print(
-            f"Wrote per-dialogue traces to: {dialogues_dir.resolve()} (n={
-                len(selected)
-            })"
+            f"Wrote per-dialogue traces to: {dialogues_dir.resolve()} (n={len(selected)})"
         )

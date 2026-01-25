@@ -19,8 +19,7 @@ class RouterBackendScore:
     """
     Per-backend router-time score record.
 
-    This is computed before routing to any single backend (i.e., it is suitable
-    for later auction/batching logic where each request is scored against each backend).
+    Computed before choosing a backend, and suitable for auction routing.
     """
 
     backend_id: str
@@ -37,6 +36,14 @@ class RouterBackendScore:
     pred_cost_tokens: float
     pred_perf_prob: float
     pred_cache_ratio: float
+
+    # Auction-derived values:
+    # client_valuation := δ * (P*quality_scale) - (1-δ) * (L*latency_scale)
+    # base_cost := cost_scale * pred_cost_tokens
+    # welfare := client_valuation - base_cost
+    client_valuation: float
+    base_cost: float
+    welfare: float
 
 
 @dataclass(frozen=True, slots=True)
@@ -74,7 +81,16 @@ class RouterLogRecord:
     pred_perf_prob: float
     pred_cache_ratio: float
 
-    # Predictions for all backends (for future auction/batching).
+    # Auction-related fields
+    routing_policy: str
+    auction_matched: bool
+    auction_total_welfare: float
+    chosen_client_valuation: float
+    chosen_base_cost: float
+    chosen_welfare: float
+    vcg_fee: Optional[float]
+    vcg_total_payment: Optional[float]
+
     backend_scores: list[RouterBackendScore]
 
     # Observations
