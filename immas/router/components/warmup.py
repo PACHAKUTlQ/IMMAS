@@ -1,5 +1,5 @@
 """
-immas.router.warmup
+immas.router.components.warmup
 
 Startup warmup for backends and online predictors using real dataset dialogues.
 """

@@ -31,7 +31,7 @@ from immas.router.pipeline.processing import handle_chat_batch
 from immas.router.state import RouterState
 from immas.router.types import PendingChatCompletion
 from immas.router.utils import fail_pending_batch
-from immas.router.warmup import warmup_router
+from immas.router.components.warmup import warmup_router
 
 if TYPE_CHECKING:
     from immas.router.config import RouterAppConfig
