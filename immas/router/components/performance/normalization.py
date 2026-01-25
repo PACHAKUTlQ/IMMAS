@@ -96,7 +96,7 @@ _LETTER_HYPHEN_RE = re.compile(r"(?<=[A-Za-z])[-–](?=[A-Za-z])")
 
 _WS_RE = re.compile(r"\s+")
 _A_TURN_PREFIX_RE = re.compile(r"^\s*A\s*\d+\s*:\s*", re.IGNORECASE)
-_FINAL_PREFIX_RE = re.compile(r"(?i)\b(final\s+)?answer\s*:\s*", re.IGNORECASE)
+_FINAL_PREFIX_RE = re.compile(r"\b(final\s+)?answer\s*:\s*", re.IGNORECASE)
 
 _ARTICLES: frozenset[str] = frozenset({"a", "an", "the"})
 
