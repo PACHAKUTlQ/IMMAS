@@ -102,6 +102,7 @@ def _print_residual_outliers(
     # Residual outliers (obs - pred)
     lat_residuals: List[Tuple[float, Mapping[str, Any]]] = []
     cost_residuals: List[Tuple[float, Mapping[str, Any]]] = []
+    welfare_residuals: List[Tuple[float, Mapping[str, Any]]] = []
     perf_residuals: List[Tuple[float, Mapping[str, Any]]] = []
 
     for r in ok_by_end:
@@ -117,6 +118,12 @@ def _print_residual_outliers(
         if _is_finite(oc) and _is_finite(pc):
             cost_residuals.append((oc - pc, r))
 
+        # Welfare residuals (analysis-derived unit)
+        ow = _f(r.get("obs_welfare"), math.nan)
+        pw = _f(r.get("pred_welfare"), math.nan)
+        if _is_finite(ow) and _is_finite(pw):
+            welfare_residuals.append((ow - pw, r))
+
         # Performance residuals: y - p where y in {0,1}
         pp = _f(r.get("pred_perf_prob"), math.nan)
         if _is_finite(pp):
@@ -128,6 +135,9 @@ def _print_residual_outliers(
     ]
     cost_residuals_sorted = sorted(
         cost_residuals, key=lambda x: abs(x[0]), reverse=True
+    )[:topk]
+    welfare_residuals_sorted = sorted(
+        welfare_residuals, key=lambda x: abs(x[0]), reverse=True
     )[:topk]
     perf_residuals_sorted = sorted(
         perf_residuals, key=lambda x: abs(x[0]), reverse=True
@@ -161,6 +171,14 @@ def _print_residual_outliers(
                 f"{_ctx(r)} resid_cost={resid:+.3f} obs_cost={obs_cost:.3f} pred_cost={
                     pred_cost:.3f}"
             )
+
+    if welfare_residuals_sorted:
+        print("\nTop |welfare residual| outliers (obs - pred, welfare unit)")
+        print("----------------------------------------------------------")
+        for resid, r in welfare_residuals_sorted:
+            ow = _f(r.get("obs_welfare"))
+            pw = _f(r.get("pred_welfare"))
+            print(f"{_ctx(r)} resid_w={resid:+.3f} obs_w={ow:.3f} pred_w={pw:.3f}")
 
     if perf_residuals_sorted:
         print("\nTop |performance residual| outliers (y - p)")
@@ -202,4 +220,68 @@ def _print_inconsistent_usage_cases(
         print(
             f"backend={backend_id} model={model} did={did} turn={turn} "
             f"prompt_tok={pt} cached_tok={ct} obs_cr={ocr:.3f}"
+        )
+
+
+def _top_negative_obs_welfare(
+    ok_by_end: Sequence[Mapping[str, Any]], *, topk: int
+) -> List[Mapping[str, Any]]:
+    def _key(r: Mapping[str, Any]) -> float:
+        return _f(r.get("obs_welfare"), math.inf)
+
+    return sorted(ok_by_end, key=_key)[:topk]
+
+
+def _print_top_negative_obs_welfare(outliers: Sequence[Mapping[str, Any]]) -> None:
+    if not outliers:
+        return
+
+    print("\nTop negative observed welfare cases (obs_welfare)")
+    print("-------------------------------------------------")
+    for r in outliers:
+        backend_id = _s(r.get("backend_id"))
+        model = _s(r.get("model"))
+        did = _short_id(_s(r.get("dialogue_id")))
+        turn = _i(r.get("turn_number"), -1)
+        ow = _f(r.get("obs_welfare"))
+        pw = _f(r.get("pred_welfare"))
+        ol = _f(r.get("obs_latency_ms"))
+        oc = _f(r.get("obs_cost_tokens"))
+        corr = 1 if bool(r.get("correct", True)) else 0
+        matched = 1 if bool(r.get("auction_matched", False)) else 0
+        print(
+            f"backend={backend_id} model={model} did={did} turn={turn} "
+            f"obs_w={ow:.3f} pred_w={pw:.3f} correct={corr} matched={matched} "
+            f"obs_ms={ol:.1f} obs_cost={oc:.3f}"
+        )
+
+
+def _top_pred_welfare_regret(
+    ok_by_end: Sequence[Mapping[str, Any]], *, topk: int
+) -> List[Mapping[str, Any]]:
+    return sorted(
+        ok_by_end,
+        key=lambda r: _f(r.get("pred_welfare_regret"), -math.inf),
+        reverse=True,
+    )[:topk]
+
+
+def _print_top_pred_welfare_regret(outliers: Sequence[Mapping[str, Any]]) -> None:
+    if not outliers:
+        return
+
+    print("\nTop predicted welfare regret cases (best_pred_welfare - pred_welfare)")
+    print("--------------------------------------------------------------------")
+    for r in outliers:
+        backend_id = _s(r.get("backend_id"))
+        model = _s(r.get("model"))
+        did = _short_id(_s(r.get("dialogue_id")))
+        turn = _i(r.get("turn_number"), -1)
+        reg = _f(r.get("pred_welfare_regret"))
+        best = _f(r.get("best_pred_welfare"))
+        pw = _f(r.get("pred_welfare"))
+        matched = 1 if bool(r.get("auction_matched", False)) else 0
+        print(
+            f"backend={backend_id} model={model} did={did} turn={turn} "
+            f"regret={reg:.3f} best={best:.3f} chosen={pw:.3f} matched={matched}"
         )
