@@ -277,10 +277,11 @@ async def warmup_router(state: RouterState) -> None:
         st = stats_by_backend[bid]
         n = st.ok
         if n > 0:
+            avg_lat = st.total_latency_ms / float(n)
+            avg_tok = st.total_tokens / float(n)
             parts.append(
-                f"{bid}: ok={st.ok} err={st.err} avg_lat_ms={
-                    st.total_latency_ms / n:.1f} "
-                f"avg_tok={st.total_tokens / n:.1f}"
+                f"{bid}: ok={st.ok} err={st.err} avg_lat_ms={avg_lat:.1f} avg_tok={
+                    avg_tok:.1f}"
             )
         else:
             parts.append(f"{bid}: ok=0 err={st.err}")
