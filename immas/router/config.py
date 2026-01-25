@@ -40,6 +40,19 @@ class BackendConfig:
     # If omitted, we default to a reasonably large value for backward compatibility.
     capacity: int = 128
 
+    # Token pricing (arbitrary per-token units; only relative values matter).
+    #
+    # This enables differentiating:
+    # - uncached prompt tokens (input_token_price),
+    # - cached prompt tokens (cached_input_token_price),
+    # - completion tokens (output_token_price).
+    #
+    # Defaults preserve the old behavior where "cost ~= total tokens" and does not
+    # privilege cache hits.
+    input_token_price: float = 1.0
+    cached_input_token_price: float = 1.0
+    output_token_price: float = 1.0
+
 
 @dataclass(frozen=True, slots=True)
 class RouterBatchingConfig:
@@ -405,6 +418,22 @@ def load_router_app_config(path: str) -> RouterAppConfig:
         model = _as_str(bm.get("model"), ctx=f"backends[{i}].model")
         capacity = _as_int(bm.get("capacity", 128), ctx=f"backends[{i}].capacity")
 
+        input_token_price = _as_float(
+            bm.get("input_token_price", bm.get("input_price", 1.0)),
+            ctx=f"backends[{i}].input_token_price",
+        )
+        cached_input_token_price = _as_float(
+            bm.get(
+                "cached_input_token_price",
+                bm.get("cached_input_price", input_token_price),
+            ),
+            ctx=f"backends[{i}].cached_input_token_price",
+        )
+        output_token_price = _as_float(
+            bm.get("output_token_price", bm.get("output_price", 1.0)),
+            ctx=f"backends[{i}].output_token_price",
+        )
+
         if not backend_id:
             raise ValueError(f"Missing/empty backends[{i}].id")
         if backend_id in seen_ids:
@@ -421,6 +450,23 @@ def load_router_app_config(path: str) -> RouterAppConfig:
         if capacity < 1:
             raise ValueError(f"backends[{i}].capacity must be >= 1, got {capacity}")
 
+        if input_token_price < 0:
+            raise ValueError(
+                f"backends[{i}].input_token_price must be >= 0, got {input_token_price}"
+            )
+        if cached_input_token_price < 0:
+            raise ValueError(
+                f"backends[{i}].cached_input_token_price must be >= 0, got {
+                    cached_input_token_price
+                }"
+            )
+        if output_token_price < 0:
+            raise ValueError(
+                f"backends[{i}].output_token_price must be >= 0, got {
+                    output_token_price
+                }"
+            )
+
         backends.append(
             BackendConfig(
                 backend_id=backend_id,
@@ -428,6 +474,9 @@ def load_router_app_config(path: str) -> RouterAppConfig:
                 api_key=api_key,
                 model=model,
                 capacity=int(capacity),
+                input_token_price=float(input_token_price),
+                cached_input_token_price=float(cached_input_token_price),
+                output_token_price=float(output_token_price),
             )
         )
 

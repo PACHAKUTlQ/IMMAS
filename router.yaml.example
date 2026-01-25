@@ -41,9 +41,15 @@ backends:
     api_key: sk-local
     model: llama3
     capacity: 128
+    input_token_price: 0.02
+    cached_input_token_price: 0.005
+    output_token_price: 0.02
 
   - id: b1
     base_url_v1: http://127.0.0.1:8001/v1
     api_key: sk-local
     model: qwen3
     capacity: 128
+    input_token_price: 0.02
+    cached_input_token_price: 0.005
+    output_token_price: 0.02
