@@ -20,6 +20,13 @@ router:
     quality_scale: 100.0
     latency_scale: 5.0
     cost_scale: 0.02
+  performance:
+    enabled: true
+    coqa_split: validation
+    rouge_metric: rouge-l
+    rouge_f1_threshold: 0.3
+    lowercase: true
+
 
 backends:
   - id: b0

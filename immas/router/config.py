@@ -87,6 +87,28 @@ class RouterWarmupConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class RouterPerformanceConfig:
+    """
+    Online performance evaluation configuration.
+
+    When enabled, the router computes a real-time `correct` signal using the CoQA
+    dataset gold answers and ROUGE. When disabled, the router uses a placeholder
+    evaluator (AlwaysCorrectEvaluator) because in real non-dataset traffic the
+    gold answer may be unknown at routing time.
+    """
+
+    enabled: bool = False
+
+    # Dataset split to load for gold answers.
+    coqa_split: str = "validation"
+
+    # ROUGE metric and threshold for correctness.
+    rouge_metric: str = "rouge-l"  # "rouge-1" | "rouge-2" | "rouge-l"
+    rouge_f1_threshold: float = 0.3
+    lowercase: bool = True
+
+
+@dataclass(frozen=True, slots=True)
 class RouterAuctionConfig:
     """
     Auction configuration.
@@ -123,6 +145,9 @@ class RouterConfig:
     routing: RoutingPolicy = "round_robin"
     batching: RouterBatchingConfig = field(default_factory=RouterBatchingConfig)
     warmup: RouterWarmupConfig = field(default_factory=RouterWarmupConfig)
+    performance: RouterPerformanceConfig = field(
+        default_factory=RouterPerformanceConfig
+    )
     auction: RouterAuctionConfig = field(default_factory=RouterAuctionConfig)
 
 
@@ -236,6 +261,32 @@ def load_router_app_config(path: str) -> RouterAppConfig:
             f"router.warmup.max_tokens must be >= 1, got {warmup_max_tokens}"
         )
 
+    perf_raw = _as_mapping(
+        router_raw.get("performance", {}), ctx="root.router.performance"
+    )
+    perf_enabled = _as_bool(
+        perf_raw.get("enabled", False), ctx="router.performance.enabled"
+    )
+    perf_coqa_split = _as_str(
+        perf_raw.get("coqa_split", "validation"), ctx="router.performance.coqa_split"
+    )
+    rouge_metric = _as_str(
+        perf_raw.get("rouge_metric", "rouge-l"), ctx="router.performance.rouge_metric"
+    )
+    rouge_f1_threshold = _as_float(
+        perf_raw.get("rouge_f1_threshold", 0.3),
+        ctx="router.performance.rouge_f1_threshold",
+    )
+    perf_lowercase = _as_bool(
+        perf_raw.get("lowercase", True), ctx="router.performance.lowercase"
+    )
+
+    if not (0.0 <= float(rouge_f1_threshold) <= 1.0):
+        raise ValueError(
+            "router.performance.rouge_f1_threshold must be in [0,1], "
+            f"got {rouge_f1_threshold}"
+        )
+
     auction_raw = _as_mapping(router_raw.get("auction", {}), ctx="root.router.auction")
     quality_scale = _as_float(
         auction_raw.get("quality_scale", 100.0), ctx="router.auction.quality_scale"
@@ -330,6 +381,13 @@ def load_router_app_config(path: str) -> RouterAppConfig:
                 timeout_s=float(warmup_timeout_s),
                 max_tokens=int(warmup_max_tokens),
                 system_prefix=str(system_prefix or "IMMAS_WARMUP"),
+            ),
+            performance=RouterPerformanceConfig(
+                enabled=bool(perf_enabled),
+                coqa_split=str(perf_coqa_split or "validation"),
+                rouge_metric=str(rouge_metric or "rouge-l"),
+                rouge_f1_threshold=float(rouge_f1_threshold),
+                lowercase=bool(perf_lowercase),
             ),
             auction=RouterAuctionConfig(
                 quality_scale=float(quality_scale),
