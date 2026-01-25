@@ -109,6 +109,26 @@ class RouterPerformanceConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class RouterDetailedCsvConfig:
+    """
+    Optional clean CSV logging of dataset-level details.
+
+    This logger is intended for validating ROUGE behavior and inspecting:
+    story/question/gold answer vs model answer with per-metric ROUGE F1 scores.
+
+    Notes
+    -----
+    - This CSV is additive and independent from the JSONL router log.
+    - Large fields (story/answers) are sanitized to keep one CSV record per line.
+    """
+
+    enabled: bool = False
+    path: str = "router_detailed_answers.csv"
+    append: bool = False
+    flush_every: int = 1
+
+
+@dataclass(frozen=True, slots=True)
 class RouterAuctionConfig:
     """
     Auction configuration.
@@ -147,6 +167,9 @@ class RouterConfig:
     warmup: RouterWarmupConfig = field(default_factory=RouterWarmupConfig)
     performance: RouterPerformanceConfig = field(
         default_factory=RouterPerformanceConfig
+    )
+    detailed_csv: RouterDetailedCsvConfig = field(
+        default_factory=RouterDetailedCsvConfig
     )
     auction: RouterAuctionConfig = field(default_factory=RouterAuctionConfig)
 
@@ -287,6 +310,27 @@ def load_router_app_config(path: str) -> RouterAppConfig:
             f"got {rouge_f1_threshold}"
         )
 
+    detailed_raw = _as_mapping(
+        router_raw.get("detailed_csv", {}), ctx="root.router.detailed_csv"
+    )
+    detailed_enabled = _as_bool(
+        detailed_raw.get("enabled", False), ctx="router.detailed_csv.enabled"
+    )
+    detailed_path = _as_str(
+        detailed_raw.get("path", "router_detailed_answers.csv"),
+        ctx="router.detailed_csv.path",
+    )
+    detailed_append = _as_bool(
+        detailed_raw.get("append", False), ctx="router.detailed_csv.append"
+    )
+    detailed_flush_every = _as_int(
+        detailed_raw.get("flush_every", 1), ctx="router.detailed_csv.flush_every"
+    )
+    if detailed_flush_every < 1:
+        raise ValueError(
+            f"router.detailed_csv.flush_every must be >= 1, got {detailed_flush_every}"
+        )
+
     auction_raw = _as_mapping(router_raw.get("auction", {}), ctx="root.router.auction")
     quality_scale = _as_float(
         auction_raw.get("quality_scale", 100.0), ctx="router.auction.quality_scale"
@@ -388,6 +432,12 @@ def load_router_app_config(path: str) -> RouterAppConfig:
                 rouge_metric=str(rouge_metric or "rouge-l"),
                 rouge_f1_threshold=float(rouge_f1_threshold),
                 lowercase=bool(perf_lowercase),
+            ),
+            detailed_csv=RouterDetailedCsvConfig(
+                enabled=bool(detailed_enabled),
+                path=str(detailed_path or "router_detailed_answers.csv"),
+                append=bool(detailed_append),
+                flush_every=int(detailed_flush_every),
             ),
             auction=RouterAuctionConfig(
                 quality_scale=float(quality_scale),

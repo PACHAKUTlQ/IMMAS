@@ -10,7 +10,7 @@ import asyncio
 import logging
 
 from contextlib import asynccontextmanager
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Optional
 
 from fastapi import FastAPI
 
@@ -18,6 +18,7 @@ from immas.common.load import AsyncLoadTracker
 from immas.data.coqa.loader import CoqaDatasetIndex
 from immas.router.components.backend import HttpOpenAIBackend
 from immas.router.components.batching import MicroBatchInfo, MicroBatcher
+from immas.router.components.detailed_csv import AsyncDetailedCsvLogger
 from immas.router.components.logger import AsyncJsonlLogger
 from immas.router.components.performance import (
     AlwaysCorrectEvaluator,
@@ -82,7 +83,21 @@ async def lifespan(app: FastAPI, cfg: "RouterAppConfig"):
 
     # Performance evaluator: placeholder vs real dataset-backed (ROUGE) evaluation.
     perf_cfg = cfg.router.performance
-    if bool(perf_cfg.enabled):
+    detailed_cfg = cfg.router.detailed_csv
+
+    ds_index: Optional[CoqaDatasetIndex] = None
+    need_dataset = bool(perf_cfg.enabled) or bool(detailed_cfg.enabled)
+    if need_dataset:
+        try:
+            split = str(perf_cfg.coqa_split or "validation")
+            _log.info("Loading CoQA dataset index (split=%s) ...", split)
+            ds_index = CoqaDatasetIndex.from_hf(split=split)
+        except Exception:
+            _log.exception("Failed to load CoQA dataset index; continuing without it")
+            ds_index = None
+
+    # Performance evaluator: placeholder vs dataset-backed (ROUGE) evaluation.
+    if bool(perf_cfg.enabled) and ds_index is not None:
         try:
             _log.info(
                 "Initializing ROUGE(CoQA) performance evaluator: split=%s metric=%s thr=%.3f",
@@ -90,7 +105,6 @@ async def lifespan(app: FastAPI, cfg: "RouterAppConfig"):
                 perf_cfg.rouge_metric,
                 perf_cfg.rouge_f1_threshold,
             )
-            ds_index = CoqaDatasetIndex.from_hf(split=str(perf_cfg.coqa_split))
             perf_evaluator = RougeCoqaEvaluator(
                 dataset=ds_index,
                 rouge_metric=str(perf_cfg.rouge_metric),
@@ -106,6 +120,20 @@ async def lifespan(app: FastAPI, cfg: "RouterAppConfig"):
     else:
         perf_evaluator = AlwaysCorrectEvaluator()
 
+    # Detailed scorer for CSV logging (independent from perf.enabled).
+    detailed_rouge_scorer: Optional[RougeCoqaEvaluator] = None
+    if bool(detailed_cfg.enabled) and ds_index is not None:
+        try:
+            detailed_rouge_scorer = RougeCoqaEvaluator(
+                dataset=ds_index,
+                rouge_metric=str(perf_cfg.rouge_metric),
+                f1_threshold=float(perf_cfg.rouge_f1_threshold),
+                lowercase=bool(perf_cfg.lowercase),
+            )
+        except Exception:
+            _log.exception("Failed to initialize detailed ROUGE scorer; disabling it")
+            detailed_rouge_scorer = None
+
     rr_lock = asyncio.Lock()
     rr_index = 0
     routing_policy = cfg.router.routing
@@ -114,6 +142,21 @@ async def lifespan(app: FastAPI, cfg: "RouterAppConfig"):
         cfg.router.log_path, append=cfg.router.log_append, flush_every=1
     )
     await logger.__aenter__()
+
+    detailed_csv_logger: Optional[AsyncDetailedCsvLogger] = None
+    if bool(detailed_cfg.enabled):
+        try:
+            detailed_csv_logger = AsyncDetailedCsvLogger(
+                str(detailed_cfg.path),
+                append=bool(detailed_cfg.append),
+                flush_every=int(detailed_cfg.flush_every),
+            )
+            await detailed_csv_logger.__aenter__()
+        except Exception:
+            _log.exception(
+                "Failed to initialize detailed CSV logger; continuing without it"
+            )
+            detailed_csv_logger = None
 
     inflight_request_tasks: set[asyncio.Task[None]] = set()
 
@@ -177,6 +220,8 @@ async def lifespan(app: FastAPI, cfg: "RouterAppConfig"):
         backend_load_trackers=backend_load_trackers,
         predictors=predictors,
         perf_evaluator=perf_evaluator,
+        detailed_rouge_scorer=detailed_rouge_scorer,
+        detailed_csv_logger=detailed_csv_logger,
         prefix_cache=prefix_cache,
         prefix_cache_lock=prefix_cache_lock,
         chat_batcher=chat_batcher,
@@ -215,6 +260,13 @@ async def lifespan(app: FastAPI, cfg: "RouterAppConfig"):
             *list(router_state.inflight_request_tasks), return_exceptions=True
         )
         router_state.inflight_request_tasks.clear()
+
+    # Close loggers (best-effort).
+    try:
+        if router_state.detailed_csv_logger is not None:
+            await router_state.detailed_csv_logger.close()
+    except Exception:
+        _log.exception("Failed to close detailed CSV logger")
 
     await router_state.logger.close()
     for b in router_state.backends:

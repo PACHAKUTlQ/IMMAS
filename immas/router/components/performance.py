@@ -6,7 +6,7 @@ Performance evaluation hooks.
 The router uses online learning and logs a `correct` field. This module provides
 a single interface for evaluating correctness for both normal traffic and warmup.
 
-This file now supports two evaluator modes:
+This file supports:
 - AlwaysCorrectEvaluator: placeholder (always True)
 - RougeCoqaEvaluator: dataset-backed evaluation using CoQA gold answers and ROUGE
 
@@ -16,15 +16,20 @@ RougeCoqaEvaluator behavior
   output (as instructed by the prompt).
 - Compares it to the dataset gold answer for (dialogue_id, turn_number) using
   the `rouge` library (https://pypi.org/project/rouge/).
-- Marks `correct=True` if the chosen ROUGE metric F1 >= threshold.
+- Marks `correct=True` if the configured ROUGE metric F1 >= threshold.
+
+Additionally, RougeCoqaEvaluator exposes `score(ctx)` returning:
+- the raw gold answer and last-line hypothesis used for scoring
+- ROUGE-1/2/L F1 scores
+- the used metric and used F1
 """
 
 from __future__ import annotations
 
 import re
 
-from dataclasses import dataclass
-from typing import Any, Mapping, Protocol
+from dataclasses import dataclass, field
+from typing import Any, Mapping, Protocol, cast
 
 from rouge import Rouge
 
@@ -51,11 +56,7 @@ class PerformanceEvaluator(Protocol):
         """
         Evaluate whether the completion should be considered correct.
 
-        Notes
-        -----
-        This project may use dataset-based exact match, semantic match, LLM-as-a-judge,
-        or other metrics. The router only needs a boolean to train a lightweight
-        performance classifier and to log a stable signal.
+        Returns a boolean signal suitable for online learning and logging.
         """
         ...
 
@@ -71,6 +72,40 @@ class AlwaysCorrectEvaluator:
 
     def evaluate(self, ctx: PerformanceEvalContext) -> bool:  # noqa: ARG002
         return True
+
+
+@dataclass(frozen=True, slots=True)
+class RougeF1Triple:
+    """ROUGE F1 breakdown."""
+
+    rouge_1_f1: float
+    rouge_2_f1: float
+    rouge_l_f1: float
+
+    def used_f1(self, metric: str) -> float:
+        m = str(metric).strip().lower()
+        if m == "rouge-1":
+            return float(self.rouge_1_f1)
+        if m == "rouge-2":
+            return float(self.rouge_2_f1)
+        return float(self.rouge_l_f1)
+
+
+@dataclass(frozen=True, slots=True)
+class RougeScoreResult:
+    """
+    Detailed scoring result for one completion.
+
+    `hypothesis_last_line_raw` is the last non-empty line of the assistant output,
+    before normalization (prefix stripping, whitespace collapse, optional lowercase).
+    """
+
+    hypothesis_last_line_raw: str
+    reference_raw: str
+    f1: RougeF1Triple
+    metric_used: str
+    used_f1: float
+    correct: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -97,9 +132,7 @@ class RougeCoqaEvaluator:
     f1_threshold: float = 0.3
     lowercase: bool = True
 
-    # We keep a single Rouge instance for efficiency.
-    # In asyncio, evaluation runs on the event loop thread; this is safe in practice.
-    _rouge: Rouge = Rouge()
+    _rouge: Rouge = field(default_factory=Rouge, init=False, repr=False, compare=False)
 
     _WS_RE = re.compile(r"\s+")
     _A_TURN_PREFIX_RE = re.compile(r"^\s*A\s*\d+\s*:\s*", re.IGNORECASE)
@@ -118,7 +151,7 @@ class RougeCoqaEvaluator:
             raise ValueError(f"f1_threshold must be in [0,1], got {self.f1_threshold}")
 
     @classmethod
-    def _extract_last_nonempty_line(cls, text: str) -> str:
+    def extract_last_nonempty_line(cls, text: str) -> str:
         """
         Extract the last non-empty line of a model output.
 
@@ -133,7 +166,7 @@ class RougeCoqaEvaluator:
         return s.strip()
 
     @classmethod
-    def _normalize_answer_line(cls, line: str, *, lowercase: bool) -> str:
+    def normalize_answer_line(cls, line: str, *, lowercase: bool) -> str:
         """
         Normalize a single-line answer for ROUGE:
         - strip common prefixes (e.g., "A3:", "Final Answer:")
@@ -149,58 +182,96 @@ class RougeCoqaEvaluator:
             s = s.lower()
         return s
 
-    def evaluate(self, ctx: PerformanceEvalContext) -> bool:
+    @staticmethod
+    def _f1_from_metric(scores: Mapping[str, Any], metric: str) -> float | None:
         """
-        Evaluate correctness for one completion.
+        Extract F1 from rouge.get_scores(..., avg=True) output for a metric key.
+        """
 
-        Returns False if:
-        - the completion has no assistant message content,
-        - turn_number is invalid,
-        - the dataset lookup fails,
-        - ROUGE scoring fails or produces missing fields,
-        - or the score is below threshold.
+        m = scores.get(metric)
+        if not isinstance(m, Mapping):
+            return None
+        f = m.get("f")
+        try:
+            return float(cast(Any, f))
+        except Exception:
+            return None
+
+    def score(self, ctx: PerformanceEvalContext) -> RougeScoreResult | None:
+        """
+        Compute detailed ROUGE scoring result for one completion.
+
+        Returns None if:
+        - invalid turn_number
+        - no assistant output
+        - dataset lookup fails
+        - ROUGE scoring fails
         """
 
         if int(ctx.turn_number) < 1:
-            return False
+            return None
 
         assistant = extract_first_assistant_message(ctx.response_json)
         if assistant is None:
-            return False
+            return None
 
-        hypothesis_raw = self._extract_last_nonempty_line(assistant.content)
-        hypothesis = self._normalize_answer_line(
-            hypothesis_raw, lowercase=self.lowercase
-        )
-
-        if not hypothesis:
-            return False
+        hypothesis_last_line_raw = self.extract_last_nonempty_line(assistant.content)
+        if not hypothesis_last_line_raw.strip():
+            return None
 
         try:
             reference_raw = self.dataset.get_answer(
                 dialogue_id=str(ctx.dialogue_id), turn_number=int(ctx.turn_number)
             )
         except Exception:
-            return False
+            return None
 
-        reference = self._normalize_answer_line(reference_raw, lowercase=self.lowercase)
-        if not reference:
-            return False
+        if not str(reference_raw or "").strip():
+            return None
+
+        hypothesis = self.normalize_answer_line(
+            hypothesis_last_line_raw, lowercase=bool(self.lowercase)
+        )
+        reference = self.normalize_answer_line(
+            str(reference_raw), lowercase=bool(self.lowercase)
+        )
+        if not hypothesis or not reference:
+            return None
 
         try:
             scores = self._rouge.get_scores(hypothesis, reference, avg=True)
         except Exception:
-            return False
+            return None
 
-        metric = str(self.rouge_metric).strip().lower()
-        m = scores.get(metric)
-        if not isinstance(m, Mapping):
-            return False
+        r1 = self._f1_from_metric(scores, "rouge-1")
+        r2 = self._f1_from_metric(scores, "rouge-2")
+        rl = self._f1_from_metric(scores, "rouge-l")
+        if r1 is None or r2 is None or rl is None:
+            return None
 
-        f = m.get("f")
-        try:
-            f1 = float(f)
-        except Exception:
-            return False
+        f1 = RougeF1Triple(
+            rouge_1_f1=float(r1), rouge_2_f1=float(r2), rouge_l_f1=float(rl)
+        )
 
-        return bool(f1 >= float(self.f1_threshold))
+        metric_used = str(self.rouge_metric).strip().lower()
+        used_f1 = float(f1.used_f1(metric_used))
+        correct = bool(used_f1 >= float(self.f1_threshold))
+
+        return RougeScoreResult(
+            hypothesis_last_line_raw=str(hypothesis_last_line_raw),
+            reference_raw=str(reference_raw),
+            f1=f1,
+            metric_used=str(metric_used),
+            used_f1=float(used_f1),
+            correct=bool(correct),
+        )
+
+    def evaluate(self, ctx: PerformanceEvalContext) -> bool:
+        """
+        Evaluate correctness for one completion.
+
+        Equivalent to `score(ctx)` followed by thresholding on the configured metric.
+        """
+
+        res = self.score(ctx)
+        return bool(res.correct) if res is not None else False

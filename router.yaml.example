@@ -26,6 +26,11 @@ router:
     rouge_metric: rouge-l
     rouge_f1_threshold: 0.3
     lowercase: true
+  detailed_csv:
+    enabled: false
+    path: router_detailed_answers.csv
+    append: false
+    flush_every: 1
 
 
 backends:
