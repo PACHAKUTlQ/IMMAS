@@ -48,6 +48,8 @@ _log = logging.getLogger(__name__)
 
 _Q_TURN_PREFIX_RE = re.compile(r"^\s*Q\s*\d+\s*:\s*", re.IGNORECASE)
 
+_IMMAS_T_FIRST_TOKEN_MONOTONIC_KEY = "_immas_t_first_token_monotonic"
+
 
 def _extract_story_and_question(messages: Any) -> tuple[str, str]:
     """
@@ -154,6 +156,7 @@ async def _maybe_log_detailed_csv(
 
     Never raises.
     """
+
     logger = state.detailed_csv_logger
     if not logger:
         return
@@ -225,6 +228,12 @@ async def _process_one_chat_completion(
     - measures observations
     - updates predictor and router prefix cache on success
     - logs
+
+    Notes
+    -----
+    `obs_latency_ms` is a TTFT-like proxy when upstream streaming is enabled:
+    we use the first streamed chunk arrival time (monotonic) reported by the
+    backend forwarder. If unavailable, we fall back to end-to-end latency.
     """
 
     pending = prep.pending
@@ -278,14 +287,31 @@ async def _process_one_chat_completion(
                     )
         t1 = time.monotonic()
 
-        obs_latency_ms = (t1 - t0) * 1000.0
+        resp_json_dict = resp_json if isinstance(resp_json, dict) else None
+
+        # Prefer TTFT-like latency if backend provided it; else fall back.
+        t_first_token_mon: float | None = None
+        if resp_json_dict is not None:
+            raw = resp_json_dict.pop(_IMMAS_T_FIRST_TOKEN_MONOTONIC_KEY, None)
+            try:
+                t_first_token_mon = float(raw) if raw is not None else None
+            except Exception:
+                t_first_token_mon = None
+
+        if t_first_token_mon is not None:
+            obs_latency_ms = max(0.0, (t_first_token_mon - t0) * 1000.0)
+        else:
+            obs_latency_ms = (t1 - t0) * 1000.0
+
         queue_wait_ms = max(0.0, (t0 - pending.t_enqueued_monotonic) * 1000.0)
 
         completion_id = (
-            str(resp_json.get("id") or "") if isinstance(resp_json, dict) else ""
+            str(resp_json_dict.get("id") or "")
+            if isinstance(resp_json_dict, dict)
+            else ""
         )
 
-        usage = parse_usage(resp_json if isinstance(resp_json, dict) else {})
+        usage = parse_usage(resp_json_dict if isinstance(resp_json_dict, dict) else {})
         obs_prompt_tokens = usage.prompt_tokens
         obs_completion_tokens = usage.completion_tokens
         obs_total_tokens = usage.total_tokens
@@ -300,8 +326,6 @@ async def _process_one_chat_completion(
         error: Optional[str] = None
         correct = False
         perf_details: TokenSpanScoreResult | RougeScoreResult | None = None
-
-        resp_json_dict = resp_json if isinstance(resp_json, dict) else None
 
         if 200 <= int(status) < 300 and resp_json_dict is not None:
             ctx = PerformanceEvalContext(
