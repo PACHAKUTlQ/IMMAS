@@ -77,6 +77,7 @@ def _write_plots(
 
     obs_lat_finite: list[float] = [x for x in obs_lat if _is_finite(x)]
     obs_cr_finite: list[float] = [x for x in obs_cache_ratio_all if _is_finite(x)]
+    obs_cost_finite: list[float] = [x for x in obs_cost if _is_finite(x)]
 
     # -------------------------------------------------------------------------
     # completion-order evolution plots
@@ -101,22 +102,22 @@ def _write_plots(
     plt.savefig(outdir / "latency_timeseries.png", dpi=160)
     plt.close()
 
-    # Time series: cost
-    obs_cost_all_plot = _safe_float_series(ok_by_end, "obs_total_tokens")
+    # Time series: cost (cost proxy units)
+    obs_cost_all_plot = _safe_float_series(ok_by_end, "obs_cost_tokens")
     pred_cost_all_plot = _safe_float_series(ok_by_end, "pred_cost_tokens")
 
     plt.figure(figsize=(12, 5))
-    plt.plot(xs_all, obs_cost_all_plot, label="observed total tokens", linewidth=1.5)
+    plt.plot(xs_all, obs_cost_all_plot, label="observed cost proxy", linewidth=1.5)
     plt.plot(
         xs_all,
         pred_cost_all_plot,
-        label="predicted cost (tokens)",
+        label="predicted cost proxy (pred_cost_tokens)",
         linewidth=1.0,
         alpha=0.8,
     )
-    plt.title("Cost over time (completion order)")
+    plt.title("Cost proxy over time (completion order)")
     plt.xlabel("request index (by completion time)")
-    plt.ylabel("tokens")
+    plt.ylabel("cost proxy (arbitrary units)")
     plt.legend()
     plt.tight_layout()
     plt.savefig(outdir / "cost_timeseries.png", dpi=160)
@@ -185,7 +186,7 @@ def _write_plots(
         plt.savefig(outdir / "latency_scatter.png", dpi=160)
         plt.close()
 
-    # Scatter: predicted vs observed cost
+    # Scatter: predicted vs observed cost proxy
     if pred_cost and obs_cost:
         plt.figure(figsize=(6, 6))
         plt.scatter(pred_cost, obs_cost, s=10, alpha=0.6)
@@ -194,9 +195,9 @@ def _write_plots(
         plt.plot(
             [lo, hi], [lo, hi], linestyle="--", linewidth=1, color="black", alpha=0.5
         )
-        plt.title("Predicted vs observed cost (tokens)")
-        plt.xlabel("pred_cost_tokens")
-        plt.ylabel("obs_total_tokens")
+        plt.title("Predicted vs observed cost proxy")
+        plt.xlabel("pred_cost_tokens (cost proxy)")
+        plt.ylabel("obs_cost_tokens (cost proxy)")
         plt.tight_layout()
         plt.savefig(outdir / "cost_scatter.png", dpi=160)
         plt.close()
@@ -210,6 +211,16 @@ def _write_plots(
         plt.ylabel("count")
         plt.tight_layout()
         plt.savefig(outdir / "obs_latency_hist.png", dpi=160)
+        plt.close()
+
+    if obs_cost_finite:
+        plt.figure(figsize=(7, 5))
+        plt.hist(obs_cost_finite, bins=50, alpha=0.85)
+        plt.title("Observed cost proxy distribution")
+        plt.xlabel("obs_cost_tokens")
+        plt.ylabel("count")
+        plt.tight_layout()
+        plt.savefig(outdir / "obs_cost_hist.png", dpi=160)
         plt.close()
 
     if obs_cr_finite:
@@ -284,7 +295,7 @@ def _write_plots(
         plt.figure(figsize=(7, 5))
         plt.hist(resid, bins=60, alpha=0.85)
         plt.title("Cost residuals distribution (obs - pred)")
-        plt.xlabel("residual_tokens")
+        plt.xlabel("residual_cost")
         plt.ylabel("count")
         plt.tight_layout()
         plt.savefig(outdir / "cost_residuals_hist.png", dpi=160)
@@ -339,18 +350,18 @@ def _write_plots(
     by_turn_pred_cache: DefaultDict[int, List[float]] = defaultdict(list)
     by_turn_latency: DefaultDict[int, List[float]] = defaultdict(list)
     by_turn_pred_cost: DefaultDict[int, List[float]] = defaultdict(list)
-    by_turn_obs_total: DefaultDict[int, List[float]] = defaultdict(list)
+    by_turn_obs_cost: DefaultDict[int, List[float]] = defaultdict(list)
     by_turn_pred_perf: DefaultDict[int, List[float]] = defaultdict(list)
     by_turn_correct: DefaultDict[int, List[float]] = defaultdict(list)
 
     for s in dialogue_series:
-        for t, ocr, pcr, lat, pc, ot, pp, corr in zip(
+        for t, ocr, pcr, lat, pc, oc, pp, corr in zip(
             s.turns,
             s.obs_cache_ratio,
             s.pred_cache_ratio,
             s.obs_latency_ms,
             s.pred_cost_tokens,
-            [float(x) for x in s.obs_total_tokens],
+            s.obs_cost_tokens,
             s.pred_perf_prob,
             s.correct,
         ):
@@ -362,8 +373,8 @@ def _write_plots(
                 by_turn_latency[t].append(float(lat))
             if _is_finite(pc):
                 by_turn_pred_cost[t].append(float(pc))
-            if _is_finite(ot):
-                by_turn_obs_total[t].append(float(ot))
+            if _is_finite(oc):
+                by_turn_obs_cost[t].append(float(oc))
             if _is_finite(pp):
                 by_turn_pred_perf[t].append(float(pp))
             by_turn_correct[t].append(1.0 if bool(corr) else 0.0)
@@ -392,7 +403,7 @@ def _write_plots(
         lat_p75: list[float] = []
 
         pred_cost_p50: list[float] = []
-        obs_total_p50: list[float] = []
+        obs_cost_p50: list[float] = []
 
         pred_perf_p50: list[float] = []
         correct_mean: list[float] = []
@@ -420,10 +431,8 @@ def _write_plots(
                 if by_turn_pred_cost[t]
                 else math.nan
             )
-            obs_total_p50.append(
-                quantile(by_turn_obs_total[t], 0.50)
-                if by_turn_obs_total[t]
-                else math.nan
+            obs_cost_p50.append(
+                quantile(by_turn_obs_cost[t], 0.50) if by_turn_obs_cost[t] else math.nan
             )
 
             pred_perf_p50.append(
@@ -432,7 +441,7 @@ def _write_plots(
                 else math.nan
             )
             correct_mean.append(
-                sum(by_turn_correct[t]) / float(len(by_turn_correct[t]))
+                (sum(by_turn_correct[t]) / float(len(by_turn_correct[t])))
                 if by_turn_correct[t]
                 else math.nan
             )
@@ -474,12 +483,12 @@ def _write_plots(
         ax2.legend(loc="best")
 
         ax3 = plt.subplot(4, 1, 3, sharex=ax1)
-        ax3.plot(t_x, obs_total_p50, label="obs_total_tokens p50", linewidth=1.8)
+        ax3.plot(t_x, obs_cost_p50, label="obs_cost_tokens p50", linewidth=1.8)
         ax3.plot(
             t_x, pred_cost_p50, label="pred_cost_tokens p50", linewidth=1.2, alpha=0.9
         )
         ax3.set_xlabel("turn_number")
-        ax3.set_ylabel("tokens")
+        ax3.set_ylabel("cost proxy (units)")
         ax3.legend(loc="best")
 
         ax4 = plt.subplot(4, 1, 4, sharex=ax1)
@@ -615,7 +624,7 @@ def _write_plots(
 
         ax4 = plt.subplot(6, 1, 5, sharex=ax0)
         ax4.plot(
-            xs, s.obs_total_tokens, marker="o", label="obs_total_tokens", linewidth=1.8
+            xs, s.obs_cost_tokens, marker="o", label="obs_cost_tokens", linewidth=1.8
         )
         ax4.plot(
             xs,
@@ -625,7 +634,7 @@ def _write_plots(
             linewidth=1.2,
             alpha=0.85,
         )
-        ax4.set_ylabel("tokens")
+        ax4.set_ylabel("cost proxy")
         ax4.legend(loc="best")
         ax4.grid(True, alpha=0.25)
 

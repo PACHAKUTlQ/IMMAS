@@ -23,6 +23,10 @@ from immas.analysis.analyzer_aggregates import (
     _compute_per_turn_aggregates,
     _print_per_turn_aggregates,
 )
+from immas.analysis.analyzer_cost import (
+    annotate_records_with_observed_cost,
+    load_backend_prices_from_router_config,
+)
 from immas.analysis.analyzer_metrics import (
     compute_binary_prob_metrics,
     extract_perf_pairs_from_records,
@@ -71,6 +75,7 @@ def _print_backend_usage(ok_by_end: List[Mapping[str, Any]]) -> None:
 
     This answers "which backend is used" at a glance, including model/base_url context.
     """
+
     by_backend: dict[str, list[Mapping[str, Any]]] = {}
     for r in ok_by_end:
         bid = _s(r.get("backend_id")) or "backend_unknown"
@@ -106,6 +111,14 @@ def main() -> None:
         "--dialogue-id",
         default="",
         help="If provided, filter to a specific dialogue_id.",
+    )
+    ap.add_argument(
+        "--router-config",
+        default=os.environ.get("IMMAS_ROUTER_CONFIG", ""),
+        help=(
+            "Optional router YAML config path for backend prices. "
+            "If omitted/unavailable, cost analysis may be inaccurate when prices differ."
+        ),
     )
     ap.add_argument("--topk", type=int, default=10, help="How many outliers to print.")
     ap.add_argument(
@@ -143,6 +156,35 @@ def main() -> None:
         print("No successful records to analyze.")
         return
 
+    prices_by_backend_id: dict[str, Any] = {}
+    cfg_path = str(args.router_config or "").strip()
+    if cfg_path:
+        try:
+            prices_by_backend_id = load_backend_prices_from_router_config(cfg_path)
+            print(f"\nLoaded backend prices from config: {Path(cfg_path).resolve()}")
+        except Exception as e:
+            prices_by_backend_id = {}
+            print(
+                f"\nWARNING: failed to load backend prices from --router-config: {
+                    cfg_path
+                } ({type(e).__name__})"
+            )
+
+    ann = annotate_records_with_observed_cost(
+        records=records, prices_by_backend_id=prices_by_backend_id
+    )
+    print(
+        f"Annotated obs_cost_tokens: n_annotated={ann.n_annotated} n_skipped={
+            ann.n_skipped
+        } "
+        f"n_unknown_backend={ann.n_unknown_backend}"
+    )
+    if not cfg_path:
+        print(
+            "NOTE: --router-config not provided; obs_cost_tokens uses default prices "
+            "(so cost metrics may be wrong if backends have different prices)."
+        )
+
     # Completion-order time series (for model evolution / load effects)
     ok_by_end = sorted(ok, key=lambda r: _f(r.get("t_end_monotonic")))
 
@@ -150,7 +192,7 @@ def main() -> None:
 
     # Pairwise metrics (skips missing/unparseable)
     pred_lat, obs_lat = _pairs(ok_by_end, "pred_latency_ms", "obs_latency_ms")
-    pred_cost, obs_cost = _pairs(ok_by_end, "pred_cost_tokens", "obs_total_tokens")
+    pred_cost, obs_cost = _pairs(ok_by_end, "pred_cost_tokens", "obs_cost_tokens")
     pred_cache, obs_cache = _pairs(ok_by_end, "pred_cache_ratio", "obs_cache_ratio")
 
     # Performance pairs (probability vs label)
@@ -186,17 +228,17 @@ def main() -> None:
             f"p99={quantile(obs_lat_finite, 0.99):.1f}"
         )
 
-    print(f"\nCost pairs:                        n={len(obs_cost)}")
-    print(f"Cost MAE (tok):                    {mae(pred_cost, obs_cost):.2f}")
-    print(f"Cost RMSE (tok):                   {rmse(pred_cost, obs_cost):.2f}")
+    print(f"\nCost pairs (cost proxy):           n={len(obs_cost)}")
+    print(f"Cost MAE (proxy):                  {mae(pred_cost, obs_cost):.3f}")
+    print(f"Cost RMSE (proxy):                 {rmse(pred_cost, obs_cost):.3f}")
     print(f"Cost corr:                         {pearsonr(pred_cost, obs_cost):.3f}")
     print(f"Cost R^2:                          {r2_score(pred_cost, obs_cost):.3f}")
     if obs_cost_finite:
         print(
-            "Cost quantiles (tok): "
-            f"p50={quantile(obs_cost_finite, 0.50):.1f}  "
-            f"p90={quantile(obs_cost_finite, 0.90):.1f}  "
-            f"p99={quantile(obs_cost_finite, 0.99):.1f}"
+            "Cost quantiles (proxy): "
+            f"p50={quantile(obs_cost_finite, 0.50):.3f}  "
+            f"p90={quantile(obs_cost_finite, 0.90):.3f}  "
+            f"p99={quantile(obs_cost_finite, 0.99):.3f}"
         )
 
     # Cache reuse summary (no mismatch deep-dive)
@@ -300,6 +342,7 @@ def main() -> None:
         by_turn_pred_cache,
         by_turn_latency,
         by_turn_pred_cost,
+        by_turn_obs_cost,
         by_turn_obs_total,
         by_turn_pred_perf,
         by_turn_correct,
@@ -312,6 +355,7 @@ def main() -> None:
         by_turn_pred_cache=by_turn_pred_cache,
         by_turn_latency=by_turn_latency,
         by_turn_pred_cost=by_turn_pred_cost,
+        by_turn_obs_cost=by_turn_obs_cost,
         by_turn_obs_total=by_turn_obs_total,
         by_turn_pred_perf=by_turn_pred_perf,
         by_turn_correct=by_turn_correct,

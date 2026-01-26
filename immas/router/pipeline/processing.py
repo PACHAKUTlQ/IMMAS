@@ -34,6 +34,7 @@ from immas.router.pipeline.routing import (
     select_backends_auction,
     select_backends_round_robin,
 )
+from immas.router.pricing import BackendTokenPrices, compute_observed_cost_tokens
 from immas.router.state import RouterState
 from immas.router.types import PendingChatCompletion, PreparedChatCompletion
 from immas.router.utils import (
@@ -291,6 +292,11 @@ async def _process_one_chat_completion(
         obs_cached_tokens = usage.cached_tokens
         obs_cache_ratio = usage.cache_ratio
 
+        prices = (
+            state.backend_prices_by_id.get(backend.backend_id) or BackendTokenPrices()
+        )
+        obs_cost_tokens = compute_observed_cost_tokens(usage=usage, prices=prices)
+
         error: Optional[str] = None
         correct = False
         perf_details: TokenSpanScoreResult | RougeScoreResult | None = None
@@ -341,7 +347,7 @@ async def _process_one_chat_completion(
             await state.predictors.update_one(
                 prep.chosen_predictor_input,
                 real_latency_ms=float(obs_latency_ms),
-                real_cost_tokens=int(obs_total_tokens),
+                real_cost_tokens=float(obs_cost_tokens),
                 real_perf_correct=bool(correct),
             )
 

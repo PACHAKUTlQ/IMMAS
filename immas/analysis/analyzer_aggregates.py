@@ -20,6 +20,7 @@ def _compute_per_turn_aggregates(
     DefaultDict[int, List[float]],  # pred_cache_ratio
     DefaultDict[int, List[float]],  # obs_latency_ms
     DefaultDict[int, List[float]],  # pred_cost_tokens
+    DefaultDict[int, List[float]],  # obs_cost_tokens
     DefaultDict[int, List[float]],  # obs_total_tokens
     DefaultDict[int, List[float]],  # pred_perf_prob
     DefaultDict[int, List[float]],  # correct (0/1)
@@ -31,6 +32,7 @@ def _compute_per_turn_aggregates(
     by_turn_latency: DefaultDict[int, List[float]] = defaultdict(list)
 
     by_turn_pred_cost: DefaultDict[int, List[float]] = defaultdict(list)
+    by_turn_obs_cost: DefaultDict[int, List[float]] = defaultdict(list)
     by_turn_obs_total: DefaultDict[int, List[float]] = defaultdict(list)
 
     by_turn_pred_perf: DefaultDict[int, List[float]] = defaultdict(list)
@@ -46,6 +48,7 @@ def _compute_per_turn_aggregates(
             pcr,
             lat,
             pcost,
+            ocost,
             otok,
             pperf,
             corr,
@@ -57,6 +60,7 @@ def _compute_per_turn_aggregates(
             s.pred_cache_ratio,
             s.obs_latency_ms,
             s.pred_cost_tokens,
+            s.obs_cost_tokens,
             [float(x) for x in s.obs_total_tokens],
             s.pred_perf_prob,
             s.correct,
@@ -72,6 +76,8 @@ def _compute_per_turn_aggregates(
 
             if _is_finite(pcost):
                 by_turn_pred_cost[t].append(float(pcost))
+            if _is_finite(ocost):
+                by_turn_obs_cost[t].append(float(ocost))
             if _is_finite(otok):
                 by_turn_obs_total[t].append(float(otok))
 
@@ -87,6 +93,7 @@ def _compute_per_turn_aggregates(
         by_turn_pred_cache,
         by_turn_latency,
         by_turn_pred_cost,
+        by_turn_obs_cost,
         by_turn_obs_total,
         by_turn_pred_perf,
         by_turn_correct,
@@ -101,6 +108,7 @@ def _print_per_turn_aggregates(
     by_turn_pred_cache: DefaultDict[int, List[float]],
     by_turn_latency: DefaultDict[int, List[float]],
     by_turn_pred_cost: DefaultDict[int, List[float]],
+    by_turn_obs_cost: DefaultDict[int, List[float]],
     by_turn_obs_total: DefaultDict[int, List[float]],
     by_turn_pred_perf: DefaultDict[int, List[float]],
     by_turn_correct: DefaultDict[int, List[float]],
@@ -116,7 +124,7 @@ def _print_per_turn_aggregates(
     print(
         "turn  n   mean_lat(ms)  p90_lat  "
         "mean_obs_cache  mean_pred_cache  "
-        "mean_pred_cost  mean_obs_total  "
+        "mean_pred_cost  mean_obs_cost  mean_obs_total_tok  "
         "mean_pred_perf  mean_correct  "
         "mean_prompt_tok  mean_cached_tok"
     )
@@ -126,20 +134,23 @@ def _print_per_turn_aggregates(
         ocrs = by_turn_obs_cache[t]
         pcrs = by_turn_pred_cache[t]
         pcs = by_turn_pred_cost[t]
+        ocs = by_turn_obs_cost[t]
         ots = by_turn_obs_total[t]
         pps = by_turn_pred_perf[t]
         cors = by_turn_correct[t]
         pts = by_turn_prompt_tok[t]
         cts = by_turn_cached_tok[t]
 
+        mean_prompt = mean([float(x) for x in pts])
+        mean_cached = mean([float(x) for x in cts])
+
         print(
             f"{t:>4}  {len(lats):>3}  "
             f"{mean(lats):>11.1f}  {quantile(lats, 0.90):>7.1f}  "
             f"{mean(ocrs):>14.3f}  {mean(pcrs):>15.3f}  "
-            f"{mean(pcs):>13.1f}  {mean(ots):>13.1f}  "
+            f"{mean(pcs):>13.3f}  {mean(ocs):>12.3f}  {mean(ots):>16.1f}  "
             f"{mean(pps):>13.3f}  {mean(cors):>12.3f}  "
-            f"{mean([float(x) for x in pts]):>15.1f}  {
-                mean([float(x) for x in cts]):>15.1f}"
+            f"{mean_prompt:>15.1f}  {mean_cached:>15.1f}"
         )
 
     if len(turns_sorted) > 30:

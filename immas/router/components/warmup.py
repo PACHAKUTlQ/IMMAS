@@ -23,6 +23,7 @@ from immas.openai.usage import parse_usage
 from immas.router.components.performance import PerformanceEvalContext
 from immas.router.components.predictor import PredictorInput
 from immas.router.components.prefix_cache import match_prefix
+from immas.router.pricing import BackendTokenPrices, compute_observed_cost_tokens
 from immas.router.state import RouterState
 
 _log = logging.getLogger(__name__)
@@ -145,6 +146,8 @@ async def warmup_router(state: RouterState) -> None:
         if not model:
             return
 
+        prices = state.backend_prices_by_id.get(backend_id) or BackendTokenPrices()
+
         messages: list[dict[str, Any]] = _initial_messages(
             dialogue, system_text=system_text
         )
@@ -224,6 +227,8 @@ async def warmup_router(state: RouterState) -> None:
             usage = parse_usage(resp_json)
             obs_total_tokens = int(usage.total_tokens)
 
+            obs_cost_tokens = compute_observed_cost_tokens(usage=usage, prices=prices)
+
             ctx = PerformanceEvalContext(
                 run_id=run_id,
                 dialogue_id=dialogue.dialogue_id,
@@ -237,7 +242,7 @@ async def warmup_router(state: RouterState) -> None:
             await state.predictors.update_one(
                 inp,
                 real_latency_ms=float(_WARMUP_TRAIN_LATENCY_MS),
-                real_cost_tokens=int(obs_total_tokens),
+                real_cost_tokens=float(obs_cost_tokens),
                 real_perf_correct=bool(correct),
             )
 

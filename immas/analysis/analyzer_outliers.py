@@ -76,7 +76,8 @@ def _print_top_latency_outliers(top_lat: Sequence[Mapping[str, Any]]) -> None:
         ocr = _f(r.get("obs_cache_ratio"))
 
         pred_cost = _f(r.get("pred_cost_tokens"))
-        obs_cost = _f(r.get("obs_total_tokens"))
+        obs_cost = _f(r.get("obs_cost_tokens"))
+        obs_total_tok = _f(r.get("obs_total_tokens"))
 
         pred_perf = _f(r.get("pred_perf_prob"))
         correct = bool(r.get("correct", True))
@@ -88,7 +89,8 @@ def _print_top_latency_outliers(top_lat: Sequence[Mapping[str, Any]]) -> None:
             f"backend={backend_id} model={model} did={did} turn={turn} "
             f"obs_ms={obs_ms:.1f} pred_ms={pred_ms:.1f} "
             f"pred_cache={pr_cache:.3f} obs_cache={ocr:.3f} "
-            f"pred_cost={pred_cost:.1f} obs_cost={obs_cost:.1f} "
+            f"pred_cost={pred_cost:.3f} obs_cost={obs_cost:.3f} obs_total_tok={
+                obs_total_tok:.1f} "
             f"pred_perf={pred_perf:.3f} correct={int(correct)} "
             f"inflight={inflight} rps_1s={rps:.1f}"
         )
@@ -109,8 +111,8 @@ def _print_residual_outliers(
         if _is_finite(ol) and _is_finite(pl):
             lat_residuals.append((ol - pl, r))
 
-        # Cost residuals (tokens)
-        oc = _f(r.get("obs_total_tokens"), math.nan)
+        # Cost residuals (cost proxy units)
+        oc = _f(r.get("obs_cost_tokens"), math.nan)
         pc = _f(r.get("pred_cost_tokens"), math.nan)
         if _is_finite(oc) and _is_finite(pc):
             cost_residuals.append((oc - pc, r))
@@ -150,14 +152,14 @@ def _print_residual_outliers(
             )
 
     if cost_residuals_sorted:
-        print("\nTop |cost residual| outliers (obs - pred, tokens)")
-        print("------------------------------------------------")
+        print("\nTop |cost residual| outliers (obs - pred, cost proxy)")
+        print("-----------------------------------------------------")
         for resid, r in cost_residuals_sorted:
-            obs_tok = _f(r.get("obs_total_tokens"))
-            pred_tok = _f(r.get("pred_cost_tokens"))
+            obs_cost = _f(r.get("obs_cost_tokens"))
+            pred_cost = _f(r.get("pred_cost_tokens"))
             print(
-                f"{_ctx(r)} resid_tok={resid:+.1f} obs_tok={obs_tok:.1f} pred_tok={
-                    pred_tok:.1f}"
+                f"{_ctx(r)} resid_cost={resid:+.3f} obs_cost={obs_cost:.3f} pred_cost={
+                    pred_cost:.3f}"
             )
 
     if perf_residuals_sorted:
