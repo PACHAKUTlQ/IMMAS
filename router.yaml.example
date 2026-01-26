@@ -20,6 +20,20 @@ router:
     quality_scale: 100.0
     latency_scale: 5.0
     cost_scale: 0.02
+  performance:
+    enabled: true
+    coqa_split: validation
+    # evaluator: token_span
+    evaluator: rouge
+    rouge_metric: rouge-l
+    rouge_f1_threshold: 0.3
+    lowercase: true
+  detailed_csv:
+    enabled: false
+    path: router_detailed_answers.csv
+    append: false
+    flush_every: 1
+
 
 backends:
   - id: b0

@@ -41,7 +41,15 @@ def _make_initial_messages(dialogue: CoqaDialogue) -> List[Dict[str, Any]]:
     # Keep the initial prefix stable and deterministic.
     system = {
         "role": "system",
-        "content": "Answer the user's questions using the story. Be factual. Think very carefully and show your thinking steps, and then output the answer at the last line, below your thinking.",
+        "content": """
+Answer the user's questions using the story. Be factual.
+Think very carefully and show your thinking steps, and then output the answer at the last line, below your thinking.
+The final answer should be minimal and shortest, without **any** explanation:
+- Don't restate the question
+- Don't add introductory phrases
+- Directly output yes or no for yes-no questions without explanation.
+- Must be a **grammatical fragment**, **NOT** a complete sentence.
+""",
     }
     story_msg = {
         "role": "user",
@@ -82,7 +90,7 @@ async def run_dialogue(
                     model=model_name,
                     messages=messages,
                     temperature=0,
-                    max_tokens=64,
+                    max_tokens=1000,
                     extra_headers={
                         "X-IMMAS-RUN-ID": run_id,
                         "X-IMMAS-DIALOGUE-ID": dialogue.dialogue_id,

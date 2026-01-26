@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import time
 
 from typing import Any, Callable, Optional
@@ -17,8 +18,16 @@ from immas.openai.chat import extract_first_assistant_message, serialize_chat_me
 from immas.openai.usage import parse_usage
 from immas.router.auction.mechanism import AuctionParams, compute_welfare
 from immas.router.components.batching import MicroBatchInfo
+from immas.router.components.detailed_csv import RouterDetailedCsvRow
 from immas.router.components.logger import RouterBackendScore, RouterLogRecord
-from immas.router.components.performance import PerformanceEvalContext
+from immas.router.components.performance import (
+    PerformanceEvalContext,
+    RougeCoqaEvaluator,
+    RougeScoreResult,
+    TokenSpanCoqaEvaluator,
+    TokenSpanScoreResult,
+)
+from immas.router.components.performance.normalization import extract_last_nonempty_line
 from immas.router.components.predictor import PredictorInput
 from immas.router.components.prefix_cache import PrefixMatch, match_prefix
 from immas.router.pipeline.routing import (
@@ -35,6 +44,66 @@ from immas.router.utils import (
 
 
 _log = logging.getLogger(__name__)
+
+_Q_TURN_PREFIX_RE = re.compile(r"^\s*Q\s*\d+\s*:\s*", re.IGNORECASE)
+
+
+def _extract_story_and_question(messages: Any) -> tuple[str, str]:
+    """
+    Best-effort extraction of (story, question) from OpenAI chat messages.
+
+    Expected CoQA-shaped prompt style:
+    - system: ...
+    - user: "Story (...):\\n<story>"
+    - user: "Q{turn}: <question>"
+    - assistant: ...
+    - user: "Q{turn+1}: <question>"
+
+    Returns empty strings if extraction fails.
+    """
+    if not isinstance(messages, list):
+        return "", ""
+
+    story = ""
+    question = ""
+
+    # Story: first user message that looks like a story container.
+    for m in messages:
+        if not isinstance(m, dict):
+            continue
+        if m.get("role") != "user":
+            continue
+        c = m.get("content")
+        if not isinstance(c, str):
+            continue
+        s = c.strip()
+        if not s:
+            continue
+        if s.lower().startswith("story"):
+            # If "Story ...:\n<story>", take the part after the first newline if present.
+            if "\n" in s:
+                story = s.split("\n", 1)[1].strip()
+            else:
+                story = s
+            break
+
+    # Question: last user message content.
+    for m in reversed(messages):
+        if not isinstance(m, dict):
+            continue
+        if m.get("role") != "user":
+            continue
+        c = m.get("content")
+        if not isinstance(c, str):
+            continue
+        q = c.strip()
+        if not q:
+            continue
+        q = _Q_TURN_PREFIX_RE.sub("", q).strip()
+        question = q
+        break
+
+    return story, question
 
 
 def _task_done_callback_factory(
@@ -65,6 +134,82 @@ def _find_chosen_backend_score(
         if s.backend_id == backend_id:
             return s
     return None
+
+
+async def _maybe_log_detailed_csv(
+    *,
+    state: RouterState,
+    pending: PendingChatCompletion,
+    forwarded_body: dict[str, Any],
+    resp_json: dict[str, Any] | None,
+    perf_details: TokenSpanScoreResult | RougeScoreResult | None,
+    correct: bool,
+) -> None:
+    """
+    Best-effort detailed CSV logging.
+
+    Produces a clean row with context, answers, and performance evaluation details.
+    The logged fields depend on the configured performance evaluator.
+
+    Never raises.
+    """
+    logger = state.detailed_csv_logger
+    if not logger:
+        return
+
+    try:
+        messages = forwarded_body.get("messages")
+        story, question = _extract_story_and_question(messages)
+
+        llm_answer = ""
+        llm_answer_last_line = ""
+        if isinstance(resp_json, dict):
+            assistant = extract_first_assistant_message(resp_json)
+            if assistant and assistant.content:
+                llm_answer = str(assistant.content)
+                llm_answer_last_line = extract_last_nonempty_line(llm_answer)
+
+        evaluator_name = state.cfg.router.performance.evaluator
+        gold_answer = ""
+        token_span_matched: bool | None = None
+        rouge_metric_used: str | None = None
+        rouge_used_f1: float | None = None
+        rouge_1_f1: float | None = None
+        rouge_2_f1: float | None = None
+        rouge_l_f1: float | None = None
+
+        if isinstance(perf_details, TokenSpanScoreResult):
+            gold_answer = perf_details.reference_raw
+            token_span_matched = perf_details.matched
+        elif isinstance(perf_details, RougeScoreResult):
+            gold_answer = perf_details.reference_raw
+            rouge_metric_used = str(perf_details.metric_used)
+            rouge_used_f1 = float(perf_details.used_f1)
+            rouge_1_f1 = float(perf_details.f1.rouge_1_f1)
+            rouge_2_f1 = float(perf_details.f1.rouge_2_f1)
+            rouge_l_f1 = float(perf_details.f1.rouge_l_f1)
+
+        row = RouterDetailedCsvRow(
+            source=str(pending.source),
+            dialogue_id=str(pending.dialogue_id),
+            turn_number=int(pending.turn_number),
+            story=story,
+            question=question,
+            gold_answer=gold_answer,
+            llm_answer_last_line=llm_answer_last_line,
+            llm_answer=llm_answer,
+            evaluator=evaluator_name,
+            correct=correct,
+            token_span_matched=token_span_matched,
+            rouge_metric_used=rouge_metric_used,
+            rouge_used_f1=rouge_used_f1,
+            rouge_1_f1=rouge_1_f1,
+            rouge_2_f1=rouge_2_f1,
+            rouge_l_f1=rouge_l_f1,
+        )
+        await logger.log(row)
+    except Exception:
+        _log.exception("Failed to enqueue detailed CSV row")
 
 
 async def _process_one_chat_completion(
@@ -148,19 +293,42 @@ async def _process_one_chat_completion(
 
         error: Optional[str] = None
         correct = False
+        perf_details: TokenSpanScoreResult | RougeScoreResult | None = None
 
-        if 200 <= int(status) < 300 and isinstance(resp_json, dict):
+        resp_json_dict = resp_json if isinstance(resp_json, dict) else None
+
+        if 200 <= int(status) < 300 and resp_json_dict is not None:
             ctx = PerformanceEvalContext(
                 run_id=pending.run_id,
                 dialogue_id=pending.dialogue_id,
                 turn_number=int(pending.turn_number),
                 source=pending.source,
                 request_body=forwarded_body,
-                response_json=resp_json,
+                response_json=resp_json_dict,
             )
-            correct = bool(state.perf_evaluator.evaluate(ctx))
+
+            # Get detailed score if evaluator supports it, then get correctness.
+            if isinstance(state.perf_evaluator, TokenSpanCoqaEvaluator):
+                perf_details = state.perf_evaluator.score(ctx)
+                correct = bool(perf_details.matched) if perf_details else False
+            elif isinstance(state.perf_evaluator, RougeCoqaEvaluator):
+                perf_details = state.perf_evaluator.score(ctx)
+                correct = bool(perf_details.correct) if perf_details else False
+            else:
+                correct = bool(state.perf_evaluator.evaluate(ctx))
+
         else:
             error = f"backend_status={status}"
+
+        # Optional clean CSV row (best-effort).
+        await _maybe_log_detailed_csv(
+            state=state,
+            pending=pending,
+            forwarded_body=forwarded_body,
+            resp_json=resp_json_dict,
+            perf_details=perf_details,
+            correct=correct,
+        )
 
         evict_prefix_cache = should_evict_router_prefix_cache(
             usage=usage,
@@ -186,7 +354,7 @@ async def _process_one_chat_completion(
                         dialogue_id=pending.dialogue_id,
                     )
             else:
-                assistant = extract_first_assistant_message(resp_json)
+                assistant = extract_first_assistant_message(resp_json_dict or {})
                 if assistant is not None and isinstance(messages, list):
                     new_messages = list(messages) + [assistant.to_openai_message()]
                     new_prompt_repr = serialize_chat_messages(new_messages)
@@ -246,9 +414,14 @@ async def _process_one_chat_completion(
             correct=bool(correct),
             error=error,
         )
-        await state.logger.log(rec)
 
-        try_set_future_result(pending.future, (int(status), dict(resp_json)))
+        # Best-effort JSONL logging (should not fail requests).
+        try:
+            await state.logger.log(rec)
+        except Exception:
+            _log.exception("Failed to write JSONL router log record")
+
+        try_set_future_result(pending.future, (int(status), dict(resp_json_dict or {})))
     except asyncio.CancelledError:
         raise
     except Exception:
@@ -263,8 +436,6 @@ async def _process_one_chat_completion(
         )
 
 
-# The rest of handle_chat_batch(...) remains unchanged from your provided version.
-# (Not repeated here to avoid accidental divergence.)
 async def handle_chat_batch(
     state: RouterState,
     batch: list[PendingChatCompletion],
