@@ -4,15 +4,6 @@ immas.router.components.backend
 Backend abstraction for OpenAI-compatible servers.
 Uses a simple HTTP JSON forwarder.
 Router uses backend API keys from its own configuration.
-
-Notes
------
-This router optionally forces upstream streaming for /chat/completions in order to
-measure a TTFT-like proxy latency (time to first meaningful stream chunk) while
-still returning a standard non-streaming JSON response to clients.
-
-We embed the measured timestamp in the reconstructed JSON payload under a private
-key and the router strips it before returning to the client.
 """
 
 from __future__ import annotations
@@ -25,8 +16,7 @@ from typing import Any, Dict, Mapping, Protocol, Tuple
 
 import httpx
 
-
-_IMMAS_T_FIRST_TOKEN_MONOTONIC_KEY = "_immas_t_first_token_monotonic"
+from immas.router.telemetry import set_ttft_monotonic
 
 
 class OpenAIBackend(Protocol):
@@ -65,6 +55,7 @@ def _merge_stream_options(body: Dict[str, Any]) -> None:
 
     vLLM supports OpenAI-style `stream_options={"include_usage": true}`.
     """
+
     so = _as_mapping(body.get("stream_options"))
     if so is None:
         body["stream_options"] = {"include_usage": True}
@@ -74,6 +65,20 @@ def _merge_stream_options(body: Dict[str, Any]) -> None:
     merged = dict(so)
     merged["include_usage"] = True
     body["stream_options"] = merged
+
+
+def _json_from_bytes(data: bytes) -> Dict[str, Any]:
+    try:
+        obj = json.loads(data)
+    except Exception:
+        return {
+            "error": {"message": "Non-JSON response from backend /chat/completions"}
+        }
+    return (
+        dict(obj)
+        if isinstance(obj, Mapping)
+        else {"error": {"message": "Non-JSON response from backend /chat/completions"}}
+    )
 
 
 @dataclass(slots=True)
@@ -199,9 +204,8 @@ class HttpOpenAIBackend:
     Notes
     -----
     - Expects `base_url_v1` like "http://host:port/v1".
-    - Does not attempt streaming pass-through to the client.
+    - Does not attempt streaming pass-through.
     - Attaches configured backend Authorization header (if api_key is set).
-    - Internally, it can force upstream streaming to measure a TTFT-like proxy.
     """
 
     backend_id: str
@@ -241,15 +245,17 @@ class HttpOpenAIBackend:
         """
         Forward /v1/chat/completions.
 
-        Implementation strategy
-        -----------------------
-        We force upstream streaming and consume the SSE stream to:
-        - measure a TTFT-like proxy (first meaningful delta arrival),
+        Strategy
+        --------
+        Force upstream streaming and consume the SSE stream to:
+        - measure a TTFT-like proxy timestamp (first meaningful delta arrival),
         - reconstruct a standard non-streaming Chat Completions JSON response.
 
-        The measured monotonic timestamp is attached under the private key
-        `_immas_t_first_token_monotonic` for the router to convert into `obs_latency_ms`.
+        The monotonic timestamp is attached under an internal key for the router
+        to convert into `obs_latency_ms`, and must be stripped before returning
+        to the client.
         """
+
         url = f"{self.base_url_v1}/chat/completions"
 
         # Force upstream streaming so we can measure first chunk arrival time.
@@ -265,14 +271,8 @@ class HttpOpenAIBackend:
             ) as r:
                 # If backend didn't actually stream, fall back to JSON parsing.
                 if not _is_event_stream_response(r):
-                    try:
-                        payload = dict(await r.json())
-                    except Exception:
-                        payload = {
-                            "error": {
-                                "message": "Non-JSON response from backend /chat/completions"
-                            }
-                        }
+                    data = await r.aread()
+                    payload = _json_from_bytes(data)
                     return r.status_code, payload
 
                 recon = _StreamReconstruction()
@@ -287,17 +287,17 @@ class HttpOpenAIBackend:
                     if not line.startswith("data:"):
                         continue
 
-                    data = line[5:].strip()
-                    if not data:
+                    data_s = line[5:].strip()
+                    if not data_s:
                         continue
-                    if data == "[DONE]":
+                    if data_s == "[DONE]":
                         break
 
                     if t_first_event is None:
                         t_first_event = float(time.monotonic())
 
                     try:
-                        chunk_any = json.loads(data)
+                        chunk_any = json.loads(data_s)
                     except Exception:
                         continue
 
@@ -308,10 +308,9 @@ class HttpOpenAIBackend:
                     # If backend streams an error object, return it directly.
                     if "error" in chunk and isinstance(chunk.get("error"), Mapping):
                         payload_err = dict(chunk)
-                        if t_first_event is not None:
-                            payload_err[_IMMAS_T_FIRST_TOKEN_MONOTONIC_KEY] = float(
-                                t_first_event
-                            )
+                        t_first = t_first_event
+                        if t_first is not None:
+                            set_ttft_monotonic(payload_err, t_first)
                         return r.status_code, payload_err
 
                     # Detect first "meaningful" content delta.
@@ -339,7 +338,7 @@ class HttpOpenAIBackend:
                     t_first_content if t_first_content is not None else t_first_event
                 )
                 if t_first is not None:
-                    payload[_IMMAS_T_FIRST_TOKEN_MONOTONIC_KEY] = float(t_first)
+                    set_ttft_monotonic(payload, t_first)
 
                 return r.status_code, payload
         except Exception:
