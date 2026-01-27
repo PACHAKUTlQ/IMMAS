@@ -19,6 +19,28 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Sequence, Tuple
 
 
+def _try_float(x: Any) -> float | None:
+    try:
+        return float(x)
+    except Exception:
+        return None
+
+
+def _try_bool(x: Any, *, default: bool = False) -> bool:
+    try:
+        return bool(x)
+    except Exception:
+        return bool(default)
+
+
+def _finite_or_none(x: float | None) -> float | None:
+    if x is None:
+        return None
+    if math.isnan(x) or math.isinf(x):
+        return None
+    return float(x)
+
+
 def _clamp01(x: float) -> float:
     return max(0.0, min(1.0, float(x)))
 
@@ -202,6 +224,7 @@ def _write_turns_csv(*, out_path: Path, records: Sequence[Mapping[str, Any]]) ->
     - cached_tokens and cache ratio
     - whether cache reuse aligns with kvmatch_text
     - cost proxy behavior (pred_cost_tokens vs obs_cost_tokens)
+    - welfare/payment behavior (pred/obs welfare; VCG fees/payments)
     """
 
     cols = [
@@ -213,6 +236,8 @@ def _write_turns_csv(*, out_path: Path, records: Sequence[Mapping[str, Any]]) ->
         "turn_number",
         "t_start_monotonic",
         "t_end_monotonic",
+        "batch_id",
+        "batch_size",
         "prompt_chars",
         "cached_prompt_chars",
         "kvmatch_lcp_chars",
@@ -227,6 +252,21 @@ def _write_turns_csv(*, out_path: Path, records: Sequence[Mapping[str, Any]]) ->
         "pred_cost_tokens",
         "obs_cost_tokens",
         "obs_total_tokens",
+        "pred_perf_prob",
+        "correct",
+        "pred_client_valuation",
+        "pred_base_cost",
+        "pred_welfare",
+        "obs_client_valuation",
+        "obs_base_cost",
+        "obs_welfare",
+        "best_pred_welfare",
+        "pred_welfare_regret",
+        "routing_policy",
+        "auction_matched",
+        "auction_total_welfare",
+        "vcg_fee",
+        "vcg_total_payment",
         "router_inflight",
         "router_rps_1s",
         "error",

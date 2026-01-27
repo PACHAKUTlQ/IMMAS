@@ -24,7 +24,7 @@ from immas.analysis.analyzer_series import (
     _sanitize_file_stem,
 )
 from immas.analysis.analyzer_types import DialogueSeries
-from immas.analysis.utils import _s, _short_id, quantile, _is_finite, _pearsonr_finite
+from immas.analysis.utils import _s, quantile, _is_finite, _pearsonr_finite
 
 
 def _write_plots(
@@ -37,6 +37,8 @@ def _write_plots(
     obs_cost: Sequence[float],
     pred_cache: Sequence[float],
     obs_cache: Sequence[float],
+    pred_welfare: Sequence[float],
+    obs_welfare: Sequence[float],
     dialogue_series: Sequence[DialogueSeries],
     top_lat: Sequence[Mapping[str, Any]],
     max_dialogue_plots: int,
@@ -67,6 +69,12 @@ def _write_plots(
     correct_all: list[bool] = [bool(r.get("correct", True)) for r in ok_by_end]
     correct_all_float: list[float] = [1.0 if c else 0.0 for c in correct_all]
 
+    obs_welfare_all_plot = _safe_float_series(ok_by_end, "obs_welfare")
+    pred_welfare_all_plot = _safe_float_series(ok_by_end, "pred_welfare")
+
+    vcg_fee_all_plot = _safe_float_series(ok_by_end, "vcg_fee")
+    vcg_total_payment_all_plot = _safe_float_series(ok_by_end, "vcg_total_payment")
+
     # Backend usage (categorical)
     backend_ids: list[str] = [
         _s(r.get("backend_id")) or "backend_unknown" for r in ok_by_end
@@ -79,9 +87,10 @@ def _write_plots(
     obs_cr_finite: list[float] = [x for x in obs_cache_ratio_all if _is_finite(x)]
     obs_cost_finite: list[float] = [x for x in obs_cost if _is_finite(x)]
 
-    # -------------------------------------------------------------------------
+    obs_w_finite: list[float] = [x for x in obs_welfare if _is_finite(x)]
+    pred_w_finite: list[float] = [x for x in pred_welfare if _is_finite(x)]
+
     # completion-order evolution plots
-    # -------------------------------------------------------------------------
     xs_all: list[int] = list(range(len(ok_by_end)))
 
     # Time series: latency
@@ -123,7 +132,7 @@ def _write_plots(
     plt.savefig(outdir / "cost_timeseries.png", dpi=160)
     plt.close()
 
-    # Time series: cache ratio (no mismatch deep-dive)
+    # Time series: cache ratio
     plt.figure(figsize=(12, 5))
     plt.plot(xs_all, obs_cache_ratio_all, label="observed cache ratio", linewidth=1.5)
     plt.plot(
@@ -155,6 +164,38 @@ def _write_plots(
     plt.legend()
     plt.tight_layout()
     plt.savefig(outdir / "performance_timeseries.png", dpi=160)
+    plt.close()
+
+    # Time series: welfare (pred vs obs)
+    plt.figure(figsize=(12, 5))
+    plt.plot(xs_all, obs_welfare_all_plot, label="obs_welfare", linewidth=1.6)
+    plt.plot(
+        xs_all, pred_welfare_all_plot, label="pred_welfare", linewidth=1.1, alpha=0.85
+    )
+    plt.title("Welfare over time (completion order)")
+    plt.xlabel("request index (by completion time)")
+    plt.ylabel("welfare (utility units)")
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(outdir / "welfare_timeseries.png", dpi=160)
+    plt.close()
+
+    # Payment time series (often sparse)
+    plt.figure(figsize=(12, 5))
+    plt.plot(xs_all, vcg_fee_all_plot, label="vcg_fee", linewidth=1.4, alpha=0.9)
+    plt.plot(
+        xs_all,
+        vcg_total_payment_all_plot,
+        label="vcg_total_payment",
+        linewidth=1.2,
+        alpha=0.85,
+    )
+    plt.title("VCG payments over time (completion order)")
+    plt.xlabel("request index (by completion time)")
+    plt.ylabel("payment (utility units)")
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(outdir / "vcg_payments_timeseries.png", dpi=160)
     plt.close()
 
     # Backend usage bar plot
@@ -202,6 +243,22 @@ def _write_plots(
         plt.savefig(outdir / "cost_scatter.png", dpi=160)
         plt.close()
 
+    # Scatter: predicted vs observed welfare
+    if pred_w_finite and obs_w_finite and len(pred_w_finite) == len(obs_w_finite):
+        plt.figure(figsize=(6, 6))
+        plt.scatter(pred_w_finite, obs_w_finite, s=10, alpha=0.6)
+        lo = min(min(pred_w_finite), min(obs_w_finite))
+        hi = max(max(pred_w_finite), max(obs_w_finite))
+        plt.plot(
+            [lo, hi], [lo, hi], linestyle="--", linewidth=1, color="black", alpha=0.5
+        )
+        plt.title("Predicted vs observed welfare")
+        plt.xlabel("pred_welfare")
+        plt.ylabel("obs_welfare")
+        plt.tight_layout()
+        plt.savefig(outdir / "welfare_scatter.png", dpi=160)
+        plt.close()
+
     # Distributions
     if obs_lat_finite:
         plt.figure(figsize=(7, 5))
@@ -231,6 +288,28 @@ def _write_plots(
         plt.ylabel("count")
         plt.tight_layout()
         plt.savefig(outdir / "obs_cache_ratio_hist.png", dpi=160)
+        plt.close()
+
+    if obs_w_finite:
+        plt.figure(figsize=(7, 5))
+        plt.hist(obs_w_finite, bins=60, alpha=0.85)
+        plt.title("Observed welfare distribution")
+        plt.xlabel("obs_welfare")
+        plt.ylabel("count")
+        plt.tight_layout()
+        plt.savefig(outdir / "obs_welfare_hist.png", dpi=160)
+        plt.close()
+
+    # Payments distribution (matched tasks only usually)
+    fee_finite = [x for x in vcg_fee_all_plot if _is_finite(float(x))]
+    if fee_finite:
+        plt.figure(figsize=(7, 5))
+        plt.hist(fee_finite, bins=50, alpha=0.85)
+        plt.title("VCG fee distribution")
+        plt.xlabel("vcg_fee")
+        plt.ylabel("count")
+        plt.tight_layout()
+        plt.savefig(outdir / "vcg_fee_hist.png", dpi=160)
         plt.close()
 
     # Performance distribution + calibration curve
@@ -278,7 +357,7 @@ def _write_plots(
             plt.savefig(outdir / "performance_calibration_curve.png", dpi=160)
             plt.close()
 
-    # Residual histograms: latency, cost
+    # Residual histograms: latency, cost, welfare
     if pred_lat and obs_lat:
         resid = [o - p for p, o in zip(pred_lat, obs_lat)]
         plt.figure(figsize=(7, 5))
@@ -299,6 +378,17 @@ def _write_plots(
         plt.ylabel("count")
         plt.tight_layout()
         plt.savefig(outdir / "cost_residuals_hist.png", dpi=160)
+        plt.close()
+
+    if pred_w_finite and obs_w_finite and len(pred_w_finite) == len(obs_w_finite):
+        resid = [o - p for p, o in zip(pred_w_finite, obs_w_finite)]
+        plt.figure(figsize=(7, 5))
+        plt.hist(resid, bins=60, alpha=0.85)
+        plt.title("Welfare residuals distribution (obs - pred)")
+        plt.xlabel("residual_welfare")
+        plt.ylabel("count")
+        plt.tight_layout()
+        plt.savefig(outdir / "welfare_residuals_hist.png", dpi=160)
         plt.close()
 
     # Cached tokens vs prompt tokens (sanity scatter)
@@ -343,9 +433,7 @@ def _write_plots(
         plt.savefig(outdir / "binned_latency_vs_obs_cache_ratio.png", dpi=160)
         plt.close()
 
-    # -------------------------------------------------------------------------
     # Within-dialogue / per-turn visualization (canonical per-turn)
-    # -------------------------------------------------------------------------
     by_turn_obs_cache: DefaultDict[int, List[float]] = defaultdict(list)
     by_turn_pred_cache: DefaultDict[int, List[float]] = defaultdict(list)
     by_turn_latency: DefaultDict[int, List[float]] = defaultdict(list)
@@ -353,9 +441,11 @@ def _write_plots(
     by_turn_obs_cost: DefaultDict[int, List[float]] = defaultdict(list)
     by_turn_pred_perf: DefaultDict[int, List[float]] = defaultdict(list)
     by_turn_correct: DefaultDict[int, List[float]] = defaultdict(list)
+    by_turn_pred_welfare: DefaultDict[int, List[float]] = defaultdict(list)
+    by_turn_obs_welfare: DefaultDict[int, List[float]] = defaultdict(list)
 
     for s in dialogue_series:
-        for t, ocr, pcr, lat, pc, oc, pp, corr in zip(
+        for t, ocr, pcr, lat, pc, oc, pp, corr, pw, ow in zip(
             s.turns,
             s.obs_cache_ratio,
             s.pred_cache_ratio,
@@ -364,6 +454,8 @@ def _write_plots(
             s.obs_cost_tokens,
             s.pred_perf_prob,
             s.correct,
+            s.pred_welfare,
+            s.obs_welfare,
         ):
             if _is_finite(ocr):
                 by_turn_obs_cache[t].append(float(ocr))
@@ -378,6 +470,10 @@ def _write_plots(
             if _is_finite(pp):
                 by_turn_pred_perf[t].append(float(pp))
             by_turn_correct[t].append(1.0 if bool(corr) else 0.0)
+            if _is_finite(pw):
+                by_turn_pred_welfare[t].append(float(pw))
+            if _is_finite(ow):
+                by_turn_obs_welfare[t].append(float(ow))
 
     turns = sorted(by_turn_latency.keys())
     if turns:
@@ -407,6 +503,9 @@ def _write_plots(
 
         pred_perf_p50: list[float] = []
         correct_mean: list[float] = []
+
+        pred_w_p50: list[float] = []
+        obs_w_p50: list[float] = []
 
         for t in turns:
             t_x.append(t)
@@ -446,9 +545,20 @@ def _write_plots(
                 else math.nan
             )
 
-        plt.figure(figsize=(12, 13))
+            pred_w_p50.append(
+                quantile(by_turn_pred_welfare[t], 0.50)
+                if by_turn_pred_welfare[t]
+                else math.nan
+            )
+            obs_w_p50.append(
+                quantile(by_turn_obs_welfare[t], 0.50)
+                if by_turn_obs_welfare[t]
+                else math.nan
+            )
 
-        ax1 = plt.subplot(4, 1, 1)
+        plt.figure(figsize=(12, 16))
+
+        ax1 = plt.subplot(5, 1, 1)
         ax1.plot(t_x, obs_cache_p50, label="obs_cache_ratio p50", linewidth=1.8)
         ax1.fill_between(
             t_x,
@@ -473,7 +583,7 @@ def _write_plots(
         ax1.set_ylim(-0.05, 1.05)
         ax1.legend(loc="best")
 
-        ax2 = plt.subplot(4, 1, 2, sharex=ax1)
+        ax2 = plt.subplot(5, 1, 2, sharex=ax1)
         ax2.plot(t_x, lat_p50, label="obs_latency_ms p50", linewidth=1.8)
         ax2.fill_between(
             t_x, lat_p25, lat_p75, alpha=0.2, label="obs_latency_ms p25-p75"
@@ -482,7 +592,7 @@ def _write_plots(
         ax2.set_ylabel("latency (ms)")
         ax2.legend(loc="best")
 
-        ax3 = plt.subplot(4, 1, 3, sharex=ax1)
+        ax3 = plt.subplot(5, 1, 3, sharex=ax1)
         ax3.plot(t_x, obs_cost_p50, label="obs_cost_tokens p50", linewidth=1.8)
         ax3.plot(
             t_x, pred_cost_p50, label="pred_cost_tokens p50", linewidth=1.2, alpha=0.9
@@ -491,21 +601,26 @@ def _write_plots(
         ax3.set_ylabel("cost proxy (units)")
         ax3.legend(loc="best")
 
-        ax4 = plt.subplot(4, 1, 4, sharex=ax1)
-        ax4.plot(t_x, pred_perf_p50, label="pred_perf_prob p50", linewidth=1.5)
-        ax4.plot(t_x, correct_mean, label="mean correct", linewidth=1.5, alpha=0.85)
+        ax4 = plt.subplot(5, 1, 4, sharex=ax1)
+        ax4.plot(t_x, obs_w_p50, label="obs_welfare p50", linewidth=1.8)
+        ax4.plot(t_x, pred_w_p50, label="pred_welfare p50", linewidth=1.2, alpha=0.9)
         ax4.set_xlabel("turn_number")
-        ax4.set_ylabel("prob / rate")
-        ax4.set_ylim(-0.05, 1.05)
+        ax4.set_ylabel("welfare (units)")
         ax4.legend(loc="best")
+
+        ax5 = plt.subplot(5, 1, 5, sharex=ax1)
+        ax5.plot(t_x, pred_perf_p50, label="pred_perf_prob p50", linewidth=1.5)
+        ax5.plot(t_x, correct_mean, label="mean correct", linewidth=1.5, alpha=0.85)
+        ax5.set_xlabel("turn_number")
+        ax5.set_ylabel("prob / rate")
+        ax5.set_ylim(-0.05, 1.05)
+        ax5.legend(loc="best")
 
         plt.tight_layout()
         plt.savefig(outdir / "per_turn_profiles.png", dpi=160)
         plt.close()
 
-    # -------------------------------------------------------------------------
-    # Per-dialogue trace plots (now includes latency per dialogue)
-    # -------------------------------------------------------------------------
+    # Per-dialogue trace plots (includes welfare + payments)
     must_include: set[str] = set()
     for r in top_lat:
         must_include.add(_s(r.get("dialogue_id")))
@@ -555,13 +670,12 @@ def _write_plots(
         mean_lat = float(sum(obs_lat_f) / len(obs_lat_f)) if obs_lat_f else math.nan
         p90_lat = quantile(obs_lat_f, 0.90) if obs_lat_f else math.nan
 
-        sid = _short_id(s.dialogue_id, 24)
+        sid = s.dialogue_id if len(s.dialogue_id) <= 24 else s.dialogue_id[:24]
         backend_ids_joined = ",".join(sorted(set(s.backend_id)))
 
-        # Added one panel for latency (obs vs pred): 6 panels total.
-        plt.figure(figsize=(12, 18))
+        plt.figure(figsize=(12, 22))
 
-        ax0 = plt.subplot(6, 1, 1)
+        ax0 = plt.subplot(7, 1, 1)
         ax0.step(xs, backend_idx, where="mid", linewidth=1.5)
         ax0.set_ylabel("backend")
         if backend_order:
@@ -569,7 +683,7 @@ def _write_plots(
             ax0.set_yticklabels(backend_order)
         ax0.grid(True, alpha=0.25)
 
-        ax1 = plt.subplot(6, 1, 2, sharex=ax0)
+        ax1 = plt.subplot(7, 1, 2, sharex=ax0)
         ax1.plot(
             xs, s.obs_cache_ratio, marker="o", label="obs_cache_ratio", linewidth=1.8
         )
@@ -586,8 +700,7 @@ def _write_plots(
         ax1.legend(loc="best")
         ax1.grid(True, alpha=0.25)
 
-        # New: latency per dialogue (obs vs pred)
-        ax2 = plt.subplot(6, 1, 3, sharex=ax0)
+        ax2 = plt.subplot(7, 1, 3, sharex=ax0)
         ax2.plot(
             xs, s.obs_latency_ms, marker="o", label="obs_latency_ms", linewidth=1.8
         )
@@ -603,7 +716,7 @@ def _write_plots(
         ax2.legend(loc="best")
         ax2.grid(True, alpha=0.25)
 
-        ax3 = plt.subplot(6, 1, 4, sharex=ax0)
+        ax3 = plt.subplot(7, 1, 4, sharex=ax0)
         ax3.plot(
             xs,
             s.obs_prompt_tokens,
@@ -622,7 +735,7 @@ def _write_plots(
         ax3.legend(loc="best")
         ax3.grid(True, alpha=0.25)
 
-        ax4 = plt.subplot(6, 1, 5, sharex=ax0)
+        ax4 = plt.subplot(7, 1, 5, sharex=ax0)
         ax4.plot(
             xs, s.obs_cost_tokens, marker="o", label="obs_cost_tokens", linewidth=1.8
         )
@@ -638,12 +751,34 @@ def _write_plots(
         ax4.legend(loc="best")
         ax4.grid(True, alpha=0.25)
 
-        ax5 = plt.subplot(6, 1, 6, sharex=ax0)
-        correct_float: list[float] = [1.0 if c else 0.0 for c in s.correct]
+        ax5 = plt.subplot(7, 1, 6, sharex=ax0)
+        ax5.plot(xs, s.obs_welfare, marker="o", label="obs_welfare", linewidth=1.8)
         ax5.plot(
-            xs, s.pred_perf_prob, marker="o", label="pred_perf_prob", linewidth=1.5
+            xs,
+            s.pred_welfare,
+            marker="o",
+            label="pred_welfare",
+            linewidth=1.2,
+            alpha=0.85,
         )
         ax5.plot(
+            xs,
+            s.vcg_total_payment,
+            marker="o",
+            label="vcg_total_payment",
+            linewidth=1.0,
+            alpha=0.75,
+        )
+        ax5.set_ylabel("welfare / payment")
+        ax5.legend(loc="best")
+        ax5.grid(True, alpha=0.25)
+
+        ax6 = plt.subplot(7, 1, 7, sharex=ax0)
+        correct_float: list[float] = [1.0 if c else 0.0 for c in s.correct]
+        ax6.plot(
+            xs, s.pred_perf_prob, marker="o", label="pred_perf_prob", linewidth=1.5
+        )
+        ax6.plot(
             xs,
             correct_float,
             marker="o",
@@ -651,11 +786,11 @@ def _write_plots(
             linewidth=1.0,
             alpha=0.7,
         )
-        ax5.set_xlabel("turn_number")
-        ax5.set_ylabel("prob / label")
-        ax5.set_ylim(-0.05, 1.05)
-        ax5.legend(loc="best")
-        ax5.grid(True, alpha=0.25)
+        ax6.set_xlabel("turn_number")
+        ax6.set_ylabel("prob / label")
+        ax6.set_ylim(-0.05, 1.05)
+        ax6.legend(loc="best")
+        ax6.grid(True, alpha=0.25)
 
         title = (
             f"Dialogue trace did={sid} turns={len(xs)} backends={backend_ids_joined} "
