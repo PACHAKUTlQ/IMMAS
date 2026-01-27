@@ -36,6 +36,7 @@ from immas.router.pipeline.routing import (
 )
 from immas.router.pricing import BackendTokenPrices, compute_observed_cost_tokens
 from immas.router.state import RouterState
+from immas.router.telemetry import pop_ttft_monotonic
 from immas.router.types import PendingChatCompletion, PreparedChatCompletion
 from immas.router.utils import (
     fail_pending_batch,
@@ -154,6 +155,7 @@ async def _maybe_log_detailed_csv(
 
     Never raises.
     """
+
     logger = state.detailed_csv_logger
     if not logger:
         return
@@ -225,6 +227,17 @@ async def _process_one_chat_completion(
     - measures observations
     - updates predictor and router prefix cache on success
     - logs
+
+    Notes
+    -----
+    This router treats "latency" as a TTFT-like proxy when upstream streaming is
+    enabled. Specifically:
+    - obs_latency_ms is computed from (t_first_stream_chunk - t_start_monotonic),
+    - t_end_monotonic in the JSONL log record is also set to that TTFT timestamp,
+      so downstream code that computes latency from timestamps sees TTFT too.
+
+    The client-visible request latency remains end-to-end completion time because
+    the router must consume the full stream to return a non-streaming JSON response.
     """
 
     pending = prep.pending
@@ -276,16 +289,30 @@ async def _process_one_chat_completion(
                         forwarded_body,
                         headers=backend_headers,
                     )
-        t1 = time.monotonic()
+        t_complete = time.monotonic()
 
-        obs_latency_ms = (t1 - t0) * 1000.0
+        resp_json_dict = resp_json if isinstance(resp_json, dict) else None
+
+        # Strip internal telemetry from payload before any external exposure.
+        t_first_token_mon = pop_ttft_monotonic(resp_json_dict)
+
+        # Latency is TTFT-like when available, else completion time.
+        if t_first_token_mon is not None:
+            obs_latency_ms = max(0.0, (t_first_token_mon - t0) * 1000.0)
+            t_end_for_log = float(t_first_token_mon)
+        else:
+            obs_latency_ms = (t_complete - t0) * 1000.0
+            t_end_for_log = float(t_complete)
+
         queue_wait_ms = max(0.0, (t0 - pending.t_enqueued_monotonic) * 1000.0)
 
         completion_id = (
-            str(resp_json.get("id") or "") if isinstance(resp_json, dict) else ""
+            str(resp_json_dict.get("id") or "")
+            if isinstance(resp_json_dict, dict)
+            else ""
         )
 
-        usage = parse_usage(resp_json if isinstance(resp_json, dict) else {})
+        usage = parse_usage(resp_json_dict if isinstance(resp_json_dict, dict) else {})
         obs_prompt_tokens = usage.prompt_tokens
         obs_completion_tokens = usage.completion_tokens
         obs_total_tokens = usage.total_tokens
@@ -300,8 +327,6 @@ async def _process_one_chat_completion(
         error: Optional[str] = None
         correct = False
         perf_details: TokenSpanScoreResult | RougeScoreResult | None = None
-
-        resp_json_dict = resp_json if isinstance(resp_json, dict) else None
 
         if 200 <= int(status) < 300 and resp_json_dict is not None:
             ctx = PerformanceEvalContext(
@@ -381,7 +406,7 @@ async def _process_one_chat_completion(
         rec = RouterLogRecord(
             run_id=pending.run_id,
             t_start_monotonic=float(t0),
-            t_end_monotonic=float(t1),
+            t_end_monotonic=float(t_end_for_log),
             batch_id=int(prep.batch_id),
             batch_size=int(prep.batch_size),
             queue_wait_ms=float(queue_wait_ms),
