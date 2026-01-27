@@ -24,6 +24,7 @@ from immas.router.utils import (
 )
 
 RoutingPolicy = Literal["round_robin", "auction", "llmrouter"]
+PerformanceEvaluatorKind = Literal["rouge", "token_span"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -38,6 +39,19 @@ class BackendConfig:
     # Capacity is used by the auction and by per-backend concurrency control.
     # If omitted, we default to a reasonably large value for backward compatibility.
     capacity: int = 128
+
+    # Token pricing (arbitrary per-token units; only relative values matter).
+    #
+    # This enables differentiating:
+    # - uncached prompt tokens (input_token_price),
+    # - cached prompt tokens (cached_input_token_price),
+    # - completion tokens (output_token_price).
+    #
+    # Defaults preserve the old behavior where "cost ~= total tokens" and does not
+    # privilege cache hits.
+    input_token_price: float = 1.0
+    cached_input_token_price: float = 1.0
+    output_token_price: float = 1.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -79,11 +93,66 @@ class RouterWarmupConfig:
     # Request behavior
     max_concurrency: int = 4
     timeout_s: float = 30.0
-    max_tokens: int = 16
+    max_tokens: int = 1000
 
     # A short marker prepended to the warmup system message. A per-startup nonce
     # is appended at runtime.
     system_prefix: str = "IMMAS_WARMUP"
+
+
+@dataclass(frozen=True, slots=True)
+class RouterPerformanceConfig:
+    """
+    Online performance evaluation configuration.
+
+    When enabled, the router computes a real-time `correct` signal using the CoQA
+    dataset gold answers.
+
+    Evaluators
+    ----------
+    - rouge: dataset-backed evaluation using ROUGE between gold answer and the model's
+      extracted last-line answer.
+    - token_span: dataset-backed token-span substring match (fast, deterministic),
+      on the same "last line" answer after numeric normalization.
+
+    Notes
+    -----
+    When disabled, the router uses AlwaysCorrectEvaluator (placeholder) because in
+    real non-dataset traffic the gold answer may be unknown at routing time.
+    """
+
+    enabled: bool = False
+
+    # Which evaluator to use when enabled.
+    evaluator: PerformanceEvaluatorKind = "rouge"
+
+    # Dataset split to load for gold answers.
+    coqa_split: str = "validation"
+
+    # ROUGE metric and threshold for correctness (used when evaluator="rouge").
+    rouge_metric: str = "rouge-l"  # "rouge-1" | "rouge-2" | "rouge-l"
+    rouge_f1_threshold: float = 0.3
+    lowercase: bool = True
+
+
+@dataclass(frozen=True, slots=True)
+class RouterDetailedCsvConfig:
+    """
+    Optional clean CSV logging of dataset-level details.
+
+    This logger is intended for validating ROUGE behavior and inspecting:
+    story/question/gold answer vs model answer with per-metric ROUGE F1 scores.
+
+    Notes
+    -----
+    - This CSV is additive and independent from the JSONL router log.
+    - Large fields (story/answers) are sanitized to keep one CSV record per line.
+    """
+
+    enabled: bool = False
+    path: str = "router_detailed_answers.csv"
+    append: bool = False
+    flush_every: int = 1
 
 
 @dataclass(frozen=True, slots=True)
@@ -135,6 +204,12 @@ class RouterConfig:
     routing: RoutingPolicy = "round_robin"
     batching: RouterBatchingConfig = field(default_factory=RouterBatchingConfig)
     warmup: RouterWarmupConfig = field(default_factory=RouterWarmupConfig)
+    performance: RouterPerformanceConfig = field(
+        default_factory=RouterPerformanceConfig
+    )
+    detailed_csv: RouterDetailedCsvConfig = field(
+        default_factory=RouterDetailedCsvConfig
+    )
     auction: RouterAuctionConfig = field(default_factory=RouterAuctionConfig)
     llmrouter: RouterLLMRouterConfig = field(default_factory=RouterLLMRouterConfig)
 
@@ -223,7 +298,7 @@ def load_router_app_config(path: str) -> RouterAppConfig:
         warmup_raw.get("timeout_s", 30.0), ctx="router.warmup.timeout_s"
     )
     warmup_max_tokens = _as_int(
-        warmup_raw.get("max_tokens", 16), ctx="router.warmup.max_tokens"
+        warmup_raw.get("max_tokens", 1000), ctx="router.warmup.max_tokens"
     )
     system_prefix = _as_str(
         warmup_raw.get("system_prefix", "IMMAS_WARMUP"),
@@ -247,6 +322,70 @@ def load_router_app_config(path: str) -> RouterAppConfig:
     if warmup_max_tokens < 1:
         raise ValueError(
             f"router.warmup.max_tokens must be >= 1, got {warmup_max_tokens}"
+        )
+
+    perf_raw = _as_mapping(
+        router_raw.get("performance", {}), ctx="root.router.performance"
+    )
+    perf_enabled = _as_bool(
+        perf_raw.get("enabled", False), ctx="router.performance.enabled"
+    )
+    perf_evaluator_raw = (
+        _as_str(perf_raw.get("evaluator", "rouge"), ctx="router.performance.evaluator")
+        or "rouge"
+    ).lower()
+    if perf_evaluator_raw not in ("rouge", "token_span"):
+        raise ValueError(
+            "router.performance.evaluator must be one of: rouge, token_span; "
+            f"got {perf_evaluator_raw!r}"
+        )
+    perf_evaluator = cast(PerformanceEvaluatorKind, perf_evaluator_raw)
+
+    perf_coqa_split = _as_str(
+        perf_raw.get("coqa_split", "validation"), ctx="router.performance.coqa_split"
+    )
+    rouge_metric = _as_str(
+        perf_raw.get("rouge_metric", "rouge-l"), ctx="router.performance.rouge_metric"
+    )
+    if rouge_metric not in ("rouge-1", "rouge-2", "rouge-l"):
+        raise ValueError(
+            "router.performance.rouge_metric must be one of: rouge-1, rouge-2, rouge-l; "
+            f"got {rouge_metric!r}"
+        )
+
+    rouge_f1_threshold = _as_float(
+        perf_raw.get("rouge_f1_threshold", 0.3),
+        ctx="router.performance.rouge_f1_threshold",
+    )
+    perf_lowercase = _as_bool(
+        perf_raw.get("lowercase", True), ctx="router.performance.lowercase"
+    )
+
+    if not (0.0 <= float(rouge_f1_threshold) <= 1.0):
+        raise ValueError(
+            "router.performance.rouge_f1_threshold must be in [0,1], "
+            f"got {rouge_f1_threshold}"
+        )
+
+    detailed_raw = _as_mapping(
+        router_raw.get("detailed_csv", {}), ctx="root.router.detailed_csv"
+    )
+    detailed_enabled = _as_bool(
+        detailed_raw.get("enabled", False), ctx="router.detailed_csv.enabled"
+    )
+    detailed_path = _as_str(
+        detailed_raw.get("path", "router_detailed_answers.csv"),
+        ctx="router.detailed_csv.path",
+    )
+    detailed_append = _as_bool(
+        detailed_raw.get("append", False), ctx="router.detailed_csv.append"
+    )
+    detailed_flush_every = _as_int(
+        detailed_raw.get("flush_every", 1), ctx="router.detailed_csv.flush_every"
+    )
+    if detailed_flush_every < 1:
+        raise ValueError(
+            f"router.detailed_csv.flush_every must be >= 1, got {detailed_flush_every}"
         )
 
     auction_raw = _as_mapping(router_raw.get("auction", {}), ctx="root.router.auction")
@@ -292,6 +431,22 @@ def load_router_app_config(path: str) -> RouterAppConfig:
         model = _as_str(bm.get("model"), ctx=f"backends[{i}].model")
         capacity = _as_int(bm.get("capacity", 128), ctx=f"backends[{i}].capacity")
 
+        input_token_price = _as_float(
+            bm.get("input_token_price", bm.get("input_price", 1.0)),
+            ctx=f"backends[{i}].input_token_price",
+        )
+        cached_input_token_price = _as_float(
+            bm.get(
+                "cached_input_token_price",
+                bm.get("cached_input_price", input_token_price),
+            ),
+            ctx=f"backends[{i}].cached_input_token_price",
+        )
+        output_token_price = _as_float(
+            bm.get("output_token_price", bm.get("output_price", 1.0)),
+            ctx=f"backends[{i}].output_token_price",
+        )
+
         if not backend_id:
             raise ValueError(f"Missing/empty backends[{i}].id")
         if backend_id in seen_ids:
@@ -308,6 +463,23 @@ def load_router_app_config(path: str) -> RouterAppConfig:
         if capacity < 1:
             raise ValueError(f"backends[{i}].capacity must be >= 1, got {capacity}")
 
+        if input_token_price < 0:
+            raise ValueError(
+                f"backends[{i}].input_token_price must be >= 0, got {input_token_price}"
+            )
+        if cached_input_token_price < 0:
+            raise ValueError(
+                f"backends[{i}].cached_input_token_price must be >= 0, got {
+                    cached_input_token_price
+                }"
+            )
+        if output_token_price < 0:
+            raise ValueError(
+                f"backends[{i}].output_token_price must be >= 0, got {
+                    output_token_price
+                }"
+            )
+
         backends.append(
             BackendConfig(
                 backend_id=backend_id,
@@ -315,6 +487,9 @@ def load_router_app_config(path: str) -> RouterAppConfig:
                 api_key=api_key,
                 model=model,
                 capacity=int(capacity),
+                input_token_price=float(input_token_price),
+                cached_input_token_price=float(cached_input_token_price),
+                output_token_price=float(output_token_price),
             )
         )
 
@@ -365,6 +540,20 @@ def load_router_app_config(path: str) -> RouterAppConfig:
                 timeout_s=float(warmup_timeout_s),
                 max_tokens=int(warmup_max_tokens),
                 system_prefix=str(system_prefix or "IMMAS_WARMUP"),
+            ),
+            performance=RouterPerformanceConfig(
+                enabled=bool(perf_enabled),
+                evaluator=perf_evaluator,
+                coqa_split=str(perf_coqa_split or "validation"),
+                rouge_metric=str(rouge_metric or "rouge-l"),
+                rouge_f1_threshold=float(rouge_f1_threshold),
+                lowercase=bool(perf_lowercase),
+            ),
+            detailed_csv=RouterDetailedCsvConfig(
+                enabled=bool(detailed_enabled),
+                path=str(detailed_path or "router_detailed_answers.csv"),
+                append=bool(detailed_append),
+                flush_every=int(detailed_flush_every),
             ),
             auction=RouterAuctionConfig(
                 quality_scale=float(quality_scale),

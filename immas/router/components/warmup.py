@@ -1,5 +1,5 @@
 """
-immas.router.warmup
+immas.router.components.warmup
 
 Startup warmup for backends and online predictors using real dataset dialogues.
 """
@@ -23,6 +23,7 @@ from immas.openai.usage import parse_usage
 from immas.router.components.performance import PerformanceEvalContext
 from immas.router.components.predictor import PredictorInput
 from immas.router.components.prefix_cache import match_prefix
+from immas.router.pricing import BackendTokenPrices, compute_observed_cost_tokens
 from immas.router.state import RouterState
 
 _log = logging.getLogger(__name__)
@@ -145,6 +146,8 @@ async def warmup_router(state: RouterState) -> None:
         if not model:
             return
 
+        prices = state.backend_prices_by_id.get(backend_id) or BackendTokenPrices()
+
         messages: list[dict[str, Any]] = _initial_messages(
             dialogue, system_text=system_text
         )
@@ -224,6 +227,8 @@ async def warmup_router(state: RouterState) -> None:
             usage = parse_usage(resp_json)
             obs_total_tokens = int(usage.total_tokens)
 
+            obs_cost_tokens = compute_observed_cost_tokens(usage=usage, prices=prices)
+
             ctx = PerformanceEvalContext(
                 run_id=run_id,
                 dialogue_id=dialogue.dialogue_id,
@@ -237,7 +242,7 @@ async def warmup_router(state: RouterState) -> None:
             await state.predictors.update_one(
                 inp,
                 real_latency_ms=float(_WARMUP_TRAIN_LATENCY_MS),
-                real_cost_tokens=int(obs_total_tokens),
+                real_cost_tokens=float(obs_cost_tokens),
                 real_perf_correct=bool(correct),
             )
 
@@ -277,10 +282,11 @@ async def warmup_router(state: RouterState) -> None:
         st = stats_by_backend[bid]
         n = st.ok
         if n > 0:
+            avg_lat = st.total_latency_ms / float(n)
+            avg_tok = st.total_tokens / float(n)
             parts.append(
-                f"{bid}: ok={st.ok} err={st.err} avg_lat_ms={
-                    st.total_latency_ms / n:.1f} "
-                f"avg_tok={st.total_tokens / n:.1f}"
+                f"{bid}: ok={st.ok} err={st.err} avg_lat_ms={avg_lat:.1f} avg_tok={
+                    avg_tok:.1f}"
             )
         else:
             parts.append(f"{bid}: ok=0 err={st.err}")

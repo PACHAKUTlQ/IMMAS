@@ -122,9 +122,23 @@ def _build_dialogue_series(
         pred_cache_ratio=[_f(r.get("pred_cache_ratio"), math.nan) for r in per_turn],
         kvmatch_text=[_f(r.get("kvmatch_text"), math.nan) for r in per_turn],
         pred_cost_tokens=[_f(r.get("pred_cost_tokens"), math.nan) for r in per_turn],
+        obs_cost_tokens=[_f(r.get("obs_cost_tokens"), math.nan) for r in per_turn],
         obs_total_tokens=[_i(r.get("obs_total_tokens")) for r in per_turn],
         pred_perf_prob=[_f(r.get("pred_perf_prob"), math.nan) for r in per_turn],
         correct=[bool(r.get("correct", True)) for r in per_turn],
+        pred_client_valuation=[
+            _f(r.get("pred_client_valuation"), math.nan) for r in per_turn
+        ],
+        pred_base_cost=[_f(r.get("pred_base_cost"), math.nan) for r in per_turn],
+        pred_welfare=[_f(r.get("pred_welfare"), math.nan) for r in per_turn],
+        obs_client_valuation=[
+            _f(r.get("obs_client_valuation"), math.nan) for r in per_turn
+        ],
+        obs_base_cost=[_f(r.get("obs_base_cost"), math.nan) for r in per_turn],
+        obs_welfare=[_f(r.get("obs_welfare"), math.nan) for r in per_turn],
+        auction_matched=[bool(r.get("auction_matched", False)) for r in per_turn],
+        vcg_fee=[_f(r.get("vcg_fee"), math.nan) for r in per_turn],
+        vcg_total_payment=[_f(r.get("vcg_total_payment"), math.nan) for r in per_turn],
         obs_prompt_tokens=[_i(r.get("obs_prompt_tokens")) for r in per_turn],
         obs_cached_tokens=[_i(r.get("obs_cached_tokens")) for r in per_turn],
         prompt_chars=[_i(r.get("prompt_chars")) for r in per_turn],
