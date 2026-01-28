@@ -53,13 +53,10 @@ def _make_messages(example: HotpotQAExample) -> List[Dict[str, Any]]:
             "Think carefully before answering."
         ),
     }
-    
+
     formatted_context = example.get_formatted_context()
-    user_content = (
-        f"Context:\n{formatted_context}\n\n"
-        f"Question: {example.question}"
-    )
-    
+    user_content = f"Context:\n{formatted_context}\n\nQuestion: {example.question}"
+
     user_msg = {
         "role": "user",
         "content": user_content,
@@ -85,7 +82,7 @@ async def run_example(
     Execute a single HotpotQA test case (single turn).
     """
     messages = _make_messages(example)
-    
+
     # HotpotQA is 1-turn, so we hardcode turn number to 1
     turn_number = 1
 
@@ -112,8 +109,7 @@ async def run_example(
             if verbose:
                 async with print_lock:
                     tqdm.write(
-                        f"ERROR id={short_id(example.id)} "
-                        f"err={type(e).__name__}: {e}"
+                        f"ERROR id={short_id(example.id)} err={type(e).__name__}: {e}"
                     )
             return
 
@@ -122,7 +118,7 @@ async def run_example(
     obs_latency_ms = (t1 - t0) * 1000.0
     # No answer appending logic needed for history since it's single turn,
     # but we extract metrics similarly.
-    answer = resp.choices[0].message.content or ""
+    # answer = resp.choices[0].message.content or ""
     usage = getattr(resp, "usage", None)
     obs_total_tokens = int(getattr(usage, "total_tokens", 0) or 0)
 
@@ -152,7 +148,7 @@ async def main_async() -> None:
 
     max_examples = int(os.environ.get("MAX_EXAMPLES", "10"))
     max_concurrency = int(os.environ.get("MAX_CONCURRENCY", "8"))
-    
+
     if max_concurrency < 1:
         raise ValueError(f"MAX_CONCURRENCY must be >= 1, got {max_concurrency}")
 
@@ -172,12 +168,14 @@ async def main_async() -> None:
     }
     seed = int(os.environ.get("SEED", "0"))
 
-    run_id = os.environ.get("RUN_ID", "").strip() or time.strftime("hotpotqa_%Y%m%d_%H%M%S")
+    run_id = os.environ.get("RUN_ID", "").strip() or time.strftime(
+        "hotpotqa_%Y%m%d_%H%M%S"
+    )
 
     # Load dataset
     ds = load_dataset(HOTPOTQA_DATASET_NAME, HOTPOTQA_CONFIG_NAME, split=split)
     examples: List[HotpotQAExample] = []
-    
+
     # Simple iterator
     for i, ex in enumerate(ds):
         if i >= max_examples:

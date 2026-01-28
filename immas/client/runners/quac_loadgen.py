@@ -47,10 +47,10 @@ def _make_initial_messages(dialogue: QuacDialogue) -> List[Dict[str, Any]]:
             "If the answer cannot be found in the context, reply with 'CANNOTANSWER'."
         ),
     }
-    
+
     # Construct a structured context block
     context_text = dialogue.get_full_context_text()
-    
+
     context_msg = {
         "role": "user",
         "content": f"{context_text}\n\n(End of Context. I will now ask questions about this text.)",
@@ -171,7 +171,7 @@ async def main_async() -> None:
     # Load QuAC dataset
     ds = load_dataset(QUAC_DATASET_NAME, split=split)
     dialogues: List[QuacDialogue] = []
-    
+
     # Iterate and convert, skipping malformed ones if any (though strict parser raises)
     count = 0
     for ex in ds:

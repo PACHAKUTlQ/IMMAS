@@ -10,7 +10,7 @@ from __future__ import annotations
 import hashlib
 from collections import defaultdict
 from dataclasses import dataclass
-from typing import Any, Dict, Iterable, List, Mapping, Optional, cast
+from typing import Any, Dict, Iterable, List, Mapping, cast
 
 from datasets import load_dataset
 
@@ -27,6 +27,7 @@ class HotpotQATurn:
     """
     Represents a single turn (one Q&A pair) within a synthesized HotpotQA dialogue.
     """
+
     turn_id: str
     question: str
     answer: str
@@ -45,16 +46,16 @@ class HotpotQATurn:
 
         context_field = example.get("context")
         if not isinstance(context_field, Mapping):
-             # Fallback or strict error
-             context_field = {"title": [], "sentences": []}
+            # Fallback or strict error
+            context_field = {"title": [], "sentences": []}
 
         titles = context_field.get("title", [])
         sentences = context_field.get("sentences", [])
-        
+
         # Ensure strict typing for context lists
         clean_titles = [str(t) for t in (titles if isinstance(titles, list) else [])]
         clean_sentences: List[List[str]] = []
-        
+
         raw_sentences = sentences if isinstance(sentences, list) else []
         for grp in raw_sentences:
             if isinstance(grp, list):
@@ -86,6 +87,7 @@ class HotpotQADialogue:
     """
     A synthesized dialogue consisting of multiple HotpotQA turns grouped by topic.
     """
+
     dialogue_id: str
     primary_topic: str  # The title used to group these questions
     turns: List[HotpotQATurn]
@@ -104,27 +106,27 @@ class HotpotQADatasetIndex:
 
     @classmethod
     def from_hf(
-        cls, 
-        *, 
+        cls,
+        *,
         split: str = "validation",
-        max_turns_per_dialogue: int = DEFAULT_SYNTHETIC_DIALOGUE_SIZE
+        max_turns_per_dialogue: int = DEFAULT_SYNTHETIC_DIALOGUE_SIZE,
     ) -> "HotpotQADatasetIndex":
         """
         Load HotpotQA and group questions into multi-turn dialogues.
-        
+
         Strategy:
         1. Group examples by the title of their first supporting fact (heuristic for 'Topic').
         2. Chunk these groups into dialogues of size `max_turns_per_dialogue`.
         """
         ds = load_dataset(HOTPOTQA_DATASET_NAME, HOTPOTQA_CONFIG_NAME, split=split)
-        
+
         # 1. Group by topic
         topic_map: Dict[str, List[HotpotQATurn]] = defaultdict(list)
-        
+
         for ex in ds:
             try:
                 turn = HotpotQATurn.from_hf_example(cast(Mapping[str, Any], ex))
-                
+
                 # Heuristic: Use the first supporting fact title as the "Topic"
                 # If supporting facts are missing, use the first context title, or "Misc"
                 supp_facts = ex.get("supporting_facts")
@@ -134,8 +136,8 @@ class HotpotQADatasetIndex:
                     if supp_titles and len(supp_titles) > 0:
                         topic = str(supp_titles[0])
                 elif turn.context_titles:
-                     topic = turn.context_titles[0]
-                
+                    topic = turn.context_titles[0]
+
                 topic_map[topic].append(turn)
             except Exception:
                 # Silently skip malformed examples to ensure robustness
@@ -143,26 +145,24 @@ class HotpotQADatasetIndex:
 
         # 2. Convert groups to Dialogues with chunking
         dialogues: Dict[str, HotpotQADialogue] = {}
-        
+
         # Deterministic sort by topic name
         for topic in sorted(topic_map.keys()):
             turns = topic_map[topic]
             # Sort turns by ID to ensure deterministic chunking order
             turns.sort(key=lambda t: t.turn_id)
-            
+
             # Chunking
             for i in range(0, len(turns), max_turns_per_dialogue):
                 chunk_turns = turns[i : i + max_turns_per_dialogue]
-                
+
                 # Derive a stable ID: "topic_hash_chunkIndex"
                 # We use hash to handle special chars in titles
                 topic_hash = hashlib.md5(topic.encode("utf-8")).hexdigest()[:8]
                 dialogue_id = f"hp_{topic_hash}_{i // max_turns_per_dialogue}"
-                
+
                 dialogues[dialogue_id] = HotpotQADialogue(
-                    dialogue_id=dialogue_id,
-                    primary_topic=topic,
-                    turns=chunk_turns
+                    dialogue_id=dialogue_id, primary_topic=topic, turns=chunk_turns
                 )
 
         return cls(dialogues)

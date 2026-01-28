@@ -24,7 +24,7 @@ from immas.data.hotpotqa.loader import (
     HotpotQADialogue,
     HotpotQADatasetIndex,
     HotpotQATurn,
-    DEFAULT_SYNTHETIC_DIALOGUE_SIZE
+    DEFAULT_SYNTHETIC_DIALOGUE_SIZE,
 )
 
 
@@ -72,7 +72,7 @@ async def run_dialogue(
     """
     # 1. Initialize conversation history
     messages: List[Dict[str, Any]] = [_make_initial_system_message()]
-    
+
     # 2. Determine actual turns to run
     n_turns = min(dialogue.num_turns(), max_turns)
 
@@ -87,7 +87,7 @@ async def run_dialogue(
             f"Context (Topic: {dialogue.primary_topic}):\n{formatted_context}\n\n"
             f"Question: {turn_obj.question}"
         )
-        
+
         # Append User message
         messages.append({"role": "user", "content": user_content})
 
@@ -158,33 +158,46 @@ async def main_async() -> None:
 
     # Configs
     max_dialogues = int(os.environ.get("MAX_DIALOGUES", "3"))
-    max_turns_per_dialogue = int(os.environ.get("MAX_TURNS", str(DEFAULT_SYNTHETIC_DIALOGUE_SIZE)))
+    max_turns_per_dialogue = int(
+        os.environ.get("MAX_TURNS", str(DEFAULT_SYNTHETIC_DIALOGUE_SIZE))
+    )
     max_concurrency = int(os.environ.get("MAX_CONCURRENCY", "8"))
-    
+
     if max_concurrency < 1:
         raise ValueError(f"MAX_CONCURRENCY must be >= 1, got {max_concurrency}")
 
     verbose = os.environ.get("VERBOSE", "0").strip().lower() in {
-        "1", "true", "yes", "y", "on"
+        "1",
+        "true",
+        "yes",
+        "y",
+        "on",
     }
     shuffle = os.environ.get("SHUFFLE", "0").strip().lower() in {
-        "1", "true", "yes", "y", "on"
+        "1",
+        "true",
+        "yes",
+        "y",
+        "on",
     }
     seed = int(os.environ.get("SEED", "0"))
 
-    run_id = os.environ.get("RUN_ID", "").strip() or time.strftime("hotpotqa_multi_%Y%m%d_%H%M%S")
+    run_id = os.environ.get("RUN_ID", "").strip() or time.strftime(
+        "hotpotqa_multi_%Y%m%d_%H%M%S"
+    )
 
-    print(f"Loading HotpotQA (split={split})... This may take a moment to group by topic.")
-    
+    print(
+        f"Loading HotpotQA (split={split})... This may take a moment to group by topic."
+    )
+
     # Use Loader to group/chunk dialogues
     # Note: We pass max_turns here to affect how the Loader chunks the raw data
     index = HotpotQADatasetIndex.from_hf(
-        split=split, 
-        max_turns_per_dialogue=max_turns_per_dialogue
+        split=split, max_turns_per_dialogue=max_turns_per_dialogue
     )
-    
+
     all_dialogues = list(index.iter_dialogues())
-    
+
     if shuffle:
         rng = random.Random(seed)
         rng.shuffle(all_dialogues)
@@ -198,8 +211,10 @@ async def main_async() -> None:
 
     # Total requests = sum of turns in selected dialogues
     # (Use min() to handle case where dialogue has fewer turns than max)
-    total_requests = sum(min(d.num_turns(), max_turns_per_dialogue) for d in target_dialogues)
-    
+    total_requests = sum(
+        min(d.num_turns(), max_turns_per_dialogue) for d in target_dialogues
+    )
+
     pbar = tqdm(total=total_requests, desc="Requests", dynamic_ncols=True)
     pbar_lock = asyncio.Lock()
     print_lock = asyncio.Lock()

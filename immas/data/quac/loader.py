@@ -19,7 +19,7 @@ QUAC_DATASET_NAME = "quac"
 class QuacDialogue:
     """
     One QuAC dialogue.
-    
+
     Unlike CoQA, QuAC has structured context parts:
     - wikipedia_page_title
     - section_title
@@ -43,7 +43,7 @@ class QuacDialogue:
         """
         # QuAC always comes from Wikipedia
         source = "wikipedia"
-        
+
         dialogue_id = str(example.get("dialogue_id", ""))
         if not dialogue_id:
             raise ValueError("Missing 'dialogue_id' in QuAC example")
@@ -63,8 +63,7 @@ class QuacDialogue:
         # QuAC has 'orig_answers' which contains the teacher's original answer text.
         # Structure: {'texts': ['ans1', 'ans2', ...], 'answer_starts': [...]}
         answers = _extract_orig_answers_list(
-            dialogue_id=dialogue_id, 
-            orig_answers_field=example.get("orig_answers")
+            dialogue_id=dialogue_id, orig_answers_field=example.get("orig_answers")
         )
 
         if len(questions) != len(answers):
@@ -156,10 +155,12 @@ class QuacDatasetIndex:
         return self._dialogues.values()
 
 
-def _extract_orig_answers_list(*, dialogue_id: str, orig_answers_field: Any) -> List[str]:
+def _extract_orig_answers_list(
+    *, dialogue_id: str, orig_answers_field: Any
+) -> List[str]:
     """
     Extract canonical answers from the 'orig_answers' field.
-    
+
     In QuAC HF dataset, `orig_answers` is typically a dict:
     {
       'texts': ['answer turn 1', 'answer turn 2', ...],
@@ -168,7 +169,7 @@ def _extract_orig_answers_list(*, dialogue_id: str, orig_answers_field: Any) -> 
     """
     if orig_answers_field is None:
         raise KeyError(f"Missing 'orig_answers' field for dialogue_id={dialogue_id}")
-    
+
     if not isinstance(orig_answers_field, Mapping):
         raise TypeError(
             f"Expected 'orig_answers' to be a dict, got {type(orig_answers_field)!r} "
@@ -181,5 +182,5 @@ def _extract_orig_answers_list(*, dialogue_id: str, orig_answers_field: Any) -> 
             f"Expected 'orig_answers.texts' to be a list, got {type(texts)!r} "
             f"for dialogue_id={dialogue_id}"
         )
-        
+
     return [str(t) for t in texts]

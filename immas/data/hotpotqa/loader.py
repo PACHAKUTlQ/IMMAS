@@ -21,7 +21,7 @@ HOTPOTQA_CONFIG_NAME = "distractor"
 class HotpotQAExample:
     """
     One HotpotQA example: a question, an answer, and a set of supporting documents.
-    
+
     HotpotQA is a single-turn, multi-hop QA dataset.
     """
 
@@ -29,7 +29,7 @@ class HotpotQAExample:
     question: str
     answer: str
     level: str  # 'easy', 'medium', 'hard'
-    type: str   # 'comparison', 'bridge'
+    type: str  # 'comparison', 'bridge'
     # Context in HotpotQA is a list of documents (title + sentences)
     context_titles: List[str]
     context_sentences: List[List[str]]
@@ -50,19 +50,21 @@ class HotpotQAExample:
         # HF 'context' structure: {'title': ['t1', 't2'], 'sentences': [['s1'], ['s2a', 's2b']]}
         context_field = example.get("context")
         if not isinstance(context_field, Mapping):
-             raise TypeError(
+            raise TypeError(
                 f"Expected 'context' to be a dict/mapping, got {type(context_field)!r} "
                 f"for id={ex_id}"
             )
 
         titles = context_field.get("title")
         if not isinstance(titles, list):
-             raise TypeError(f"Expected context['title'] to be a list for id={ex_id}")
-        
+            raise TypeError(f"Expected context['title'] to be a list for id={ex_id}")
+
         sentences = context_field.get("sentences")
         if not isinstance(sentences, list):
-             raise TypeError(f"Expected context['sentences'] to be a list for id={ex_id}")
-        
+            raise TypeError(
+                f"Expected context['sentences'] to be a list for id={ex_id}"
+            )
+
         if len(titles) != len(sentences):
             raise ValueError(
                 f"Context title/sentences length mismatch for id={ex_id}: "
@@ -93,10 +95,10 @@ class HotpotQAExample:
         """
         Format the context paragraphs into a single string for the prompt.
         Format:
-        
+
         Title 1
         Sentence 1a. Sentence 1b.
-        
+
         Title 2
         Sentence 2a.
         """
