@@ -1,10 +1,7 @@
 """
-immas.router.components.performance
+immas.router.components.performance.base
 
-Performance evaluation hooks.
-
-The router uses online learning and logs a `correct` field. This module provides
-a single interface for evaluating correctness for both normal traffic and warmup.
+Base types for router performance evaluation.
 """
 
 from __future__ import annotations
@@ -15,7 +12,14 @@ from typing import Any, Mapping, Protocol
 
 @dataclass(frozen=True, slots=True)
 class PerformanceEvalContext:
-    """Inputs used for evaluating completion performance/correctness."""
+    """
+    Inputs used for evaluating completion performance/correctness.
+
+    Notes
+    -----
+    This is intentionally minimal and stable: evaluators should treat it as
+    immutable input, and any model-specific parsing should be done internally.
+    """
 
     run_id: str
     dialogue_id: str
@@ -26,17 +30,18 @@ class PerformanceEvalContext:
 
 
 class PerformanceEvaluator(Protocol):
-    """Protocol for evaluating correctness/performance of one completion."""
+    """
+    Protocol for evaluating correctness/performance of one completion.
+
+    Evaluators must be synchronous and non-blocking from the router's perspective
+    (no network calls, no LLM calls).
+    """
 
     def evaluate(self, ctx: PerformanceEvalContext) -> bool:
         """
         Evaluate whether the completion should be considered correct.
 
-        Notes
-        -----
-        This project may use dataset-based exact match, semantic match, LLM-as-a-judge,
-        or other metrics. The router only needs a boolean to train a lightweight
-        performance classifier and to log a stable signal.
+        Returns a boolean signal suitable for online learning and logging.
         """
         ...
 
@@ -46,8 +51,7 @@ class AlwaysCorrectEvaluator:
     """
     Placeholder evaluator that always returns True.
 
-    This keeps the router ready for a real evaluator implementation without
-    requiring changes to warmup or request processing flow.
+    Used when performance evaluation is disabled or unavailable.
     """
 
     def evaluate(self, ctx: PerformanceEvalContext) -> bool:  # noqa: ARG002

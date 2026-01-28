@@ -16,6 +16,18 @@ can:
 - pick a backend via routing policy (e.g., auction),
 - update only the chosen backend predictor with observed outcomes.
 
+Cost
+----
+The predictor's "cost_tokens" output is a *scalar cost proxy* used by the router.
+Historically it was total tokens. With backend token pricing enabled, the router
+updates this model using a *price-weighted token cost* computed from observed usage:
+
+    cost = input_price * uncached_prompt_tokens
+         + cached_input_price * cached_prompt_tokens
+         + output_price * completion_tokens
+
+We keep field names stable (e.g., pred_cost_tokens in logs) for compatibility.
+
 Cache ratio
 ----------
 We deterministically set:
@@ -96,7 +108,7 @@ class AgentPredictor:
     """
     Online predictor for:
     - latency_ms (router E2E for now)
-    - cost_tokens (total tokens)
+    - cost_tokens (scalar cost proxy; historically total tokens)
     - performance_prob (placeholder)
 
     Cache ratio:
@@ -181,7 +193,7 @@ class AgentPredictor:
         inp: PredictorInput,
         *,
         real_latency_ms: float,
-        real_cost_tokens: int,
+        real_cost_tokens: float,
         real_perf_correct: bool,
     ) -> None:
         """
@@ -294,7 +306,7 @@ class AsyncBackendPredictorPool:
         inp: PredictorInput,
         *,
         real_latency_ms: float,
-        real_cost_tokens: int,
+        real_cost_tokens: float,
         real_perf_correct: bool,
     ) -> None:
         """Update exactly one backend predictor (from inp.backend_id)."""
@@ -304,6 +316,6 @@ class AsyncBackendPredictorPool:
             pred.update(
                 inp,
                 real_latency_ms=float(real_latency_ms),
-                real_cost_tokens=int(real_cost_tokens),
+                real_cost_tokens=float(real_cost_tokens),
                 real_perf_correct=bool(real_perf_correct),
             )
