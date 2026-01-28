@@ -15,7 +15,9 @@ from typing import TYPE_CHECKING, Optional
 from fastapi import FastAPI
 
 from immas.common.load import AsyncLoadTracker
-from immas.data.coqa.loader import CoqaDatasetIndex
+
+# from immas.data.coqa.loader import CoqaDatasetIndex
+from immas.data.quac.loader import QuacDatasetIndex
 from immas.router.components.backend import HttpOpenAIBackend
 from immas.router.components.batching import MicroBatchInfo, MicroBatcher
 from immas.router.components.detailed_csv import AsyncDetailedCsvLogger
@@ -96,13 +98,13 @@ async def lifespan(app: FastAPI, cfg: "RouterAppConfig"):
     perf_cfg = cfg.router.performance
     detailed_cfg = cfg.router.detailed_csv
 
-    ds_index: Optional[CoqaDatasetIndex] = None
+    ds_index: Optional[QuacDatasetIndex] = None
     need_dataset = bool(perf_cfg.enabled) or bool(detailed_cfg.enabled)
     if need_dataset:
         try:
             split = str(perf_cfg.coqa_split or "validation")
             _log.info("Loading CoQA dataset index (split=%s) ...", split)
-            ds_index = CoqaDatasetIndex.from_hf(split=split)
+            ds_index = QuacDatasetIndex.from_hf(split=split)
         except Exception:
             _log.exception("Failed to load CoQA dataset index; continuing without it")
             ds_index = None

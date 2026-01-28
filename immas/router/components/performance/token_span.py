@@ -17,7 +17,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from immas.data.coqa.loader import CoqaDatasetIndex
+from immas.data.quac.loader import QuacDatasetIndex
 from immas.openai.chat import extract_first_assistant_message
 from immas.router.components.performance.base import PerformanceEvalContext
 from immas.router.components.performance.normalization import (
@@ -55,7 +55,7 @@ class TokenSpanCoqaEvaluator:
         If True, lowercase both hypothesis and reference during normalization.
     """
 
-    dataset: CoqaDatasetIndex
+    dataset: QuacDatasetIndex
     lowercase: bool = True
 
     def score(self, ctx: PerformanceEvalContext) -> TokenSpanScoreResult | None:
